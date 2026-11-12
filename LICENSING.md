@@ -69,7 +69,7 @@ made: `assets/breaks/ATTRIBUTION.txt`).
 | fm1-clk320-probe by curist (<https://github.com/curist/fm1-clk320-probe>): the switch from the FM-1's 360 MHz to JieLi's rated 320 MHz behind MENU > SYSTEM > CPU CLOCK (the check of the clock registers, the switch, its reason codes and a crystal-timed clock loop), unchanged; its sequence after the JieLi AC79 SDK's `sys_clock_update` (Apache-2.0) | MIT | `firmware/hal/fm1_clk320.h`, `firmware/hal/fm1_clk320_probe.h`, `LICENSES/MIT-fm1-clk320.txt` |
 | The SMK-37 board layer by genkigenki (M. Geisler) for Felucca (<https://github.com/genkigenki/Felucca>, branch `smk37`, commit b67312c; hugelton/Felucca#237): the M-VAVE SMK-37 Pro build target behind `BOARD_SMK37` (the input HAL, its velocity and pads, the LCD pins and the pad LEDs, the SMK flash map and its guards, the store's owner tag and the stock mapping's marker, the update staging and loader windows, the per-model identities, the package's region table, the installers' model rule and their tests), adapted to Skiff (its detent decoder on the SMK knobs, its store and pattern pool, its LED picture), modified 2026-10-18 | GPL-3.0-only | `firmware/hal/smk_input.h`, `firmware/hal/smk_compat.h`, `firmware/hal/fm1_flash_map.h`, `firmware/hal/fm1_lcd_hw.h`, `BOARD_SMK37` blocks in `firmware/`, `tools/build.py`, `tools/fm1pkg_make.py`, `tools/fm1_install.py`, `web/fm1ota.js`, `web/fm1pkg.js`, `tests/smk_*`, `tests/ldr_test.c`, `tests/ota_test.c`, `tests/install_test.py`, `web/test_web.mjs` |
 | fm1-to-smk37 by genkigenki (<https://github.com/genkigenki/fm1-to-smk37>): the SMK-37 hardware notes (pins, matrix, flash map, update) the SMK-37 build was checked against; no text of it is in this tree | CC BY-NC 4.0 | credit only |
-| JieLi AC79 SDK by JieLi Technology: three of its files go into every `.fwsc` package (below); none are in this tree | Apache-2.0 | `LICENSES/Apache-2.0.txt` |
+| JieLi AC79 SDK by JieLi Technology: three unmodified files go into every `.fwsc` package (below); the fork bundles only those inputs under `tools/ci/sdk/` | Apache-2.0 | `LICENSES/Apache-2.0.txt` |
 
 On the device, HOME held > ABOUT opens the information screen; turning PRESETS scrolls on into
 CREDITS, a short list of these authors, licences and source URLs.
@@ -79,7 +79,8 @@ CREDITS, a short list of these authors, licences and source URLs.
 A `.fwsc` package made by `tools/build.py` (with `tools/fm1pkg_make.py`; this is the package the
 web installer installs) holds three unmodified files from the JieLi AC79 SDK
 (<https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK>, `cpu/wl82/tools/`). They are read from your SDK
-checkout at build time (see BUILDING.md); no SDK files are in this tree.
+checkout at build time (see BUILDING.md). This fork also bundles those three unmodified inputs in
+`tools/ci/sdk/` for reliable CI, with their source commit, hashes and Apache-2.0 licence; no other SDK files are included.
 
 | File in the package | What it is |
 | --- | --- |

@@ -1,0 +1,177 @@
+name: Experimental firmware
+
+on:
+  push:
+    branches: [main, 'experimental/**']
+    paths:
+      - 'firmware/**'
+      - 'assets/**'
+      - 'tools/**'
+      - 'tests/**'
+      - 'web/emu/**'
+      - 'web/panel.js'
+      - 'build.sh'
+      - '.github/workflows/experimental-firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'assets/**'
+      - 'tools/**'
+      - 'tests/**'
+      - 'web/emu/**'
+      - 'web/panel.js'
+      - 'build.sh'
+      - '.github/workflows/experimental-firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: experimental-firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-balance:
+    name: Host balance and noise-aware tail checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.12'
+      - name: Run host calibration, regression, UBSan and quiet-tail tests
+        # No continue-on-error: calibration, fixed golden renders, arithmetic,
+        # DAC/USB harmonic limits and bad-quantizer rejection must all pass.
+        run: |
+          mkdir -p build/ci
+          sh tests/run_engine_balance_tests.sh 2>&1 | tee build/ci/engine-balance.log
+      - name: Check experimental multicore and performance-effect routing
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p build/ci
+          cc -O2 -w -DFELUCCA_ENGINE_BALANCE=1 -DVOICES_2CORE=8 -pthread \
+            -Ibuild/gen -Ifirmware/src -o build/ci/dualcore tests/dualcore_test.c -lm
+          build/ci/dualcore 2>&1 | tee build/ci/dualcore.log
+          cc -O2 -w -DFELUCCA_ENGINE_BALANCE=1 -pthread \
+            -Ibuild/gen -Ifirmware/src -o build/ci/dualcore_budget tests/dualcore_test.c -lm
+          BUDGET=1 build/ci/dualcore_budget 2>&1 | tee build/ci/dualcore-budget.log
+          cc -O2 -w -DFELUCCA_ENGINE_BALANCE=1 -Ibuild/gen -Ifirmware/src \
+            -o build/ci/perform tests/perform_test.c -lm
+          build/ci/perform 2>&1 | tee build/ci/perform.log
+      - name: Archive host diagnostics even when checks fail
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine-balance-host-${{ github.sha }}
+          path: |
+            build/host/engine_balance/*.log
+            build/host/engine_balance/tail/*.log
+            build/host/engine_balance/*.csv
+            build/host/engine_balance/*.txt
+            build/ci/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  target-firmware:
+    name: FM-1 firmware, original and experimental
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.12'
+      - name: Install hash-locked font dependencies
+        run: python3 -m pip install --require-hashes --only-binary=":all:" -r tools/ci/requirements.txt
+      - name: Fetch verified toolchain and verify bundled official SDK inputs
+        run: |
+          mkdir -p build/ci/firmware
+          tools/ci/get_dependencies.sh "$RUNNER_TEMP/skiff-deps" 2>&1 | tee build/ci/firmware/dependencies.log
+      - name: Build both variants and check target budgets and baseline suite
+        run: tools/ci/build_firmware.sh
+      - name: Archive development firmware and all diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skiff-fm1-experimental-${{ github.sha }}
+          path: build/ci/firmware/
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-simulator:
+    name: Browser simulator, original and experimental
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        balance: [0, 1]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.12'
+      - name: Install hash-locked font dependencies
+        run: python3 -m pip install --require-hashes --only-binary=":all:" -r tools/ci/requirements.txt
+      - name: Install pinned official Emscripten SDK
+        run: |
+          git init "$RUNNER_TEMP/emsdk"
+          git -C "$RUNNER_TEMP/emsdk" remote add origin https://github.com/emscripten-core/emsdk.git
+          git -C "$RUNNER_TEMP/emsdk" fetch --depth=1 origin c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56
+          git -C "$RUNNER_TEMP/emsdk" checkout --detach c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56
+          test "$(git -C "$RUNNER_TEMP/emsdk" rev-parse HEAD)" = c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56
+          "$RUNNER_TEMP/emsdk/emsdk" install 4.0.23
+          "$RUNNER_TEMP/emsdk/emsdk" activate 4.0.23
+      - name: Build simulator and verify native audio parity
+        env:
+          FELUCCA_ENGINE_BALANCE: ${{ matrix.balance }}
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          emcc --version
+          python3 -c 'import sys; sys.path.insert(0, "tools"); import build; build.generate()'
+          EMU_CFLAGS="-DFELUCCA_ENGINE_BALANCE=$FELUCCA_ENGINE_BALANCE" sh web/emu/build.sh
+          mkdir -p build/ci/simulator
+          cc -O2 -ffp-contract=off -w -DFELUCCA_ENGINE_BALANCE="$FELUCCA_ENGINE_BALANCE" \
+            -Ibuild/gen -Ifirmware/src -o build/ci/simulator/native_check web/emu/native_check.c -lm
+          build/ci/simulator/native_check build/ci/simulator/native.f32
+          node web/emu/emu_test.mjs build/emu/felucca.wasm build/ci/simulator/native.f32 \
+            2>&1 | tee build/ci/simulator/parity.log
+      - name: Package offline simulator
+        if: success()
+        run: |
+          mkdir -p build/ci/simulator/package
+          cp -R build/emu build/ci/simulator/package/
+          cp build/panel.js LICENSE LICENSING.md build/ci/simulator/package/
+          cp -R LICENSES build/ci/simulator/package/
+          cp docs/ENGINE_BALANCE.md build/ci/simulator/package/
+          find assets -type f \( -iname '*attribution*' -o -iname '*license*' -o -name 'CREDITS.txt' \) -print | \
+            while IFS= read -r file; do
+              mkdir -p "build/ci/simulator/package/source-attributions/$(dirname "$file")"
+              cp "$file" "build/ci/simulator/package/source-attributions/$file"
+            done
+          printf 'Corresponding source: https://github.com/%s/tree/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" \
+            > build/ci/simulator/package/SOURCE.txt
+          printf 'FELUCCA_ENGINE_BALANCE=%s\nSource: %s\nFrom this folder run: python3 -m http.server 8790\nOpen http://localhost:8790/emu/\nNot a hardware/USB timing simulation. No flashing or deployment.\n' \
+            '${{ matrix.balance }}' "$GITHUB_SHA" > build/ci/simulator/package/README.txt
+      - name: Archive simulator and parity log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skiff-browser-balance-${{ matrix.balance }}-${{ github.sha }}
+          path: |
+            build/ci/simulator/package/
+            build/ci/simulator/parity.log
+          if-no-files-found: error
+          retention-days: 14
