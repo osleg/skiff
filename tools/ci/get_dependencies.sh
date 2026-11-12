@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Download only the pinned official target dependencies. Never install system-wide.
+# Download the pinned official toolchain and verify bundled SDK inputs. Never install system-wide.
 set -euo pipefail
 DEST=${1:?usage: get_dependencies.sh DEST}
 mkdir -p "$DEST"
@@ -9,7 +9,7 @@ TOOLCHAIN_VERSION=20260730.1
 TOOLCHAIN_SHA256=a1545cddbc451a06bac43eb5cd96d831470c42a97c5c0b1f98879a20fc7647bd
 SDK_COMMIT=d179b4484759423312073f5fbb232501aa491047
 ARCHIVE="$DEST/jieli-linux-toolchains-$TOOLCHAIN_VERSION.tar.xz"
-curl --fail --location --retry 3 --connect-timeout 30 \
+curl --fail --location --retry 3 --connect-timeout 30 --max-time 300 \
     "https://jl-update.oss-cn-shenzhen.aliyuncs.com/jieli-linux-toolchains-$TOOLCHAIN_VERSION.tar.xz" \
     --output "$ARCHIVE"
 printf '%s  %s\n' "$TOOLCHAIN_SHA256" "$ARCHIVE" | sha256sum --check --strict
@@ -22,13 +22,10 @@ with tarfile.open(sys.argv[1], "r:xz") as archive:
 PY
 test -x "$DEST/jieli-linux-toolchains-$TOOLCHAIN_VERSION/pi32v2/bin/clang"
 SDK="$DEST/ac79-sdk"
-if [[ ! -d "$SDK/.git" ]]; then
-    git init "$SDK"
-    git -C "$SDK" remote add origin https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git
-fi
-git -C "$SDK" fetch --depth=1 origin "$SDK_COMMIT"
-git -C "$SDK" checkout --detach "$SDK_COMMIT"
-test "$(git -C "$SDK" rev-parse HEAD)" = "$SDK_COMMIT"
+SDK_SOURCE="$(cd "$(dirname "$0")/sdk" && pwd)"
+test "$(cat "$SDK_SOURCE/SOURCE_COMMIT")" = "$SDK_COMMIT"
+mkdir -p "$SDK"
+cp -R "$SDK_SOURCE/." "$SDK/"
 # Verify all three SDK bytes before packaging. These are the upstream build's pins.
 (cd "$SDK/cpu/wl82/tools" && sha256sum --check --strict <<'SUMS'
 4e3b4c220dc96641cb5a723f41e68ce41d5261ae9434bb33fbd7f2c59976ded4  uboot.boot

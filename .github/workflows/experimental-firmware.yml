@@ -92,8 +92,10 @@ jobs:
           python-version: '3.12.12'
       - name: Install hash-locked font dependencies
         run: python3 -m pip install --require-hashes --only-binary=":all:" -r tools/ci/requirements.txt
-      - name: Fetch verified JieLi toolchain and pinned official SDK
-        run: tools/ci/get_dependencies.sh "$RUNNER_TEMP/skiff-deps"
+      - name: Fetch verified toolchain and verify bundled official SDK inputs
+        run: |
+          mkdir -p build/ci/firmware
+          tools/ci/get_dependencies.sh "$RUNNER_TEMP/skiff-deps" 2>&1 | tee build/ci/firmware/dependencies.log
       - name: Build both variants and check target budgets and baseline suite
         run: tools/ci/build_firmware.sh
       - name: Archive development firmware and all diagnostics

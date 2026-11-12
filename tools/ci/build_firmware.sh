@@ -10,7 +10,12 @@ FAIL=0
 {
     printf 'Source commit: '; git rev-parse HEAD
     printf 'Toolchain: '; "$JIELI_TOOLCHAIN/pi32v2/bin/clang" --version
-    printf 'SDK commit: '; git -C "$AC79_SDK" rev-parse HEAD
+    printf 'SDK commit: '
+    if [[ -f "$AC79_SDK/SOURCE_COMMIT" ]]; then
+        cat "$AC79_SDK/SOURCE_COMMIT"
+    else
+        git -C "$AC79_SDK" rev-parse HEAD
+    fi
     python3 --version
     python3 -m pip freeze
     cc --version | head -1
@@ -57,7 +62,7 @@ if [[ -f "$OUT/baseline/felucca.elf" && -f "$OUT/experimental-balanced/felucca.e
 fi
 printf 'Corresponding source: https://github.com/%s/tree/%s\n' \
     "${GITHUB_REPOSITORY:-osleg/skiff}" "$(git rev-parse HEAD)" > "$OUT/SOURCE.txt"
-cp LICENSE LICENSING.md "$OUT/"
+cp LICENSE LICENSING.md docs/ENGINE_BALANCE.md docs/EXPERIMENTAL_CI.md "$OUT/"
 cp -R LICENSES "$OUT/"
 cp assets/samples-cc0/ATTRIBUTION.txt "$OUT/ATTRIBUTION-SAMPLES.txt"
 # Include existing sample licences/attributions without assuming their subdirectory.

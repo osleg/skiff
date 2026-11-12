@@ -60,7 +60,10 @@ recovery process and the remaining listening/target-timing checks.
   If the vendor replaces them, the workflow fails closed.
 - Official JieLi SDK: `https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git`, commit
   `d179b4484759423312073f5fbb232501aa491047` (peeled tag
-  `AC79NN_SDK_V1.2.1_2023-12-13`). The three packaged SDK files are verified against
+  `AC79NN_SDK_V1.2.1_2023-12-13`). Only the three required packaging inputs
+  (15,574 bytes) are bundled unmodified under `tools/ci/sdk/`, with origin and
+  licence, because Gitee TLS connections timed out from GitHub hosted runners.
+  There is no unverified mirror or live SDK fetch. The three files are verified against
   the pre-existing SHA256 values in `tools/build.py`. The SDK's Apache-2.0 licence
   matches `LICENSES/Apache-2.0.txt` and is included in artifacts.
 - Official Emscripten SDK: `https://github.com/emscripten-core/emsdk.git`, tag

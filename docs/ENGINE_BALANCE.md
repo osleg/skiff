@@ -120,6 +120,11 @@ but four static target cost checks fail; see the target verification below.
   cycle percentages. No budget was updated to hide them. Hardware timing and a
   review of compiled loop structure remain necessary. Linux lacks the macOS
   host instruction-counter check.
+  Disassembly review found the large ISR score is mostly a backward join into
+  shared continuation code that the estimator counts as an extra nested loop.
+  The ISR itself grows from 679 to 726 instructions (+47); removing only that
+  false span diagnostically gives cost 1,509 vs the actual baseline 1,363. This
+  diagnosis does not waive the check, remove real added work, or measure cycles.
 - Emscripten 4.0.23 builds the enabled browser simulator. Its 88,200 stereo audio
   frames match the native simulator bit-for-bit; existing boot, keys, MIDI,
   drawing, LED, playback and save-persistence checks pass. This does not emulate
