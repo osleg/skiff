@@ -77,7 +77,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     {
         echo '## Experimental FM-1 artifacts'
         echo 'Both flag values are built explicitly. These are not releases and have not been flashed.'
-        echo 'The engine-balance host job retains known USB quiet-tail failures.'
+        echo 'The host job checks frozen audio hashes and noise-aware USB tails, including deliberate quantizer regressions.'
         echo 'Target CPU figures are static estimates; hardware listening and timing remain required.'
         find "$OUT" -name '*.status' -print -exec cat {} \;
         if [[ -f "$OUT/size-diff.txt" ]]; then

@@ -12,6 +12,37 @@ static uint32_t balance_slots[3u * 0x14000u / 4u];
 
 static int unit(void)
 {
+    /* Exhaust every input in the documented mixer range for every LEVEL.
+     * The oracle does not repeat the optimized split/rounding expression. */
+    for (uint32_t level=0; level<128; level++) {
+        int32_t g=LEVEL_Q12[level];
+        for (int32_t x=-(1<<20); x<=(1<<20); x++) {
+            int64_t p=(int64_t)x*g+2048;
+            int32_t w=(int32_t)(p>=0 ? p/4096 : -((-p+4095)/4096));
+            w=w<-524287 ? -524287 : w>524287 ? 524287 : w;
+            if (lvl_mul(x,g)!=w) return 10;
+        }
+    }
+    /* Master Q22 arithmetic, all knob values at signed boundary/residue cases. */
+    static const int32_t edge[]={-8388608,-1048577,-1048576,-524289,-524288,
+        -129,-128,-127,-5,-4,-3,-2,-1,0,1,2,3,4,5,127,128,129,
+        524287,524288,1048575,1048576,8388607};
+    for (int32_t mg=0; mg<=MASTER_FULL; mg++)
+        for (uint32_t i=0; i<NELEM(edge); i++) {
+            int64_t p=(int64_t)edge[i]*mg;
+            int32_t w=(int32_t)(p>=0 ? p/32 : -((-p+31)/32));
+            if (master_q22(edge[i],mg)!=w) return 11;
+        }
+    static const int32_t mul_edge[]={INT32_MIN,INT32_MIN+1,-1048576,-65537,
+        -65536,-65535,-1,0,1,65535,65536,65537,1048576,INT32_MAX-1,INT32_MAX};
+    for (uint32_t g=0; g<=65536; g++)
+        for (uint32_t i=0; i<NELEM(mul_edge); i++) {
+            int32_t x=mul_edge[i];
+            int64_t p=(int64_t)x*g;
+            int32_t want=(int32_t)(p>=0 ? p/65536 : -((-p+65535)/65536));
+            int32_t old=(x>>16)*(int32_t)g+(int32_t)(((uint32_t)(x&65535)*g)>>16);
+            if (mulq16(x,g)!=want || old!=want) return 12;
+        }
     track_t *t = &trk[0];
     for (uint32_t e=0; e<NENGINES; e++) {
         t->engine=e;
@@ -27,14 +58,20 @@ static int unit(void)
             int64_t wide=(int64_t)x*g+128;
             int32_t want=(int32_t)(wide>=0 ? wide/256 : -((-wide+255)/256));
             if (balance_q22(x,g)!=want) return 3;
-            int32_t sum=0, lo=0;
-            balance_add(&sum,&lo,x,g);
+            int32_t q=balance_q22(x,g);
+            int32_t sum=q>>7, lo=q&127;
             if ((int64_t)sum*128+lo!=want || lo<0 || lo>127) return 4;
             if (g==32768 && (sum!=x || lo)) return 5;
             /* Opposite signals cancel to within one Q22 rounding unit. */
-            balance_add(&sum,&lo,-x,g);
-            sum+=lo>>7; lo&=127;
-            if (sum || lo>1) return 6;
+            q+=balance_q22(-x,g);
+            if (q<0 || q>1) return 6;
+            if (balance_send(x,g)!=((want+64)>>7)) return 7;
+            /* All tracks at the same extreme still fit; the wide sum and
+             * splitting into Q15 plus dac_lo must reconstruct every Q22 bit. */
+            int32_t all=0;
+            for (uint32_t k=0; k<NPART; k++) all+=balance_q22(x,g);
+            if ((int64_t)all!=(int64_t)want*NPART ||
+                (int64_t)(all>>7)*128+(all&127)!=(int64_t)want*NPART) return 8;
         }
 #endif
     }

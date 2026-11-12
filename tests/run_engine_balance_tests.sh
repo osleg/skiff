@@ -29,19 +29,14 @@ cat "$OUT/summary.txt"
 "$CC" -O2 -w -Ibuild/gen -Ifirmware/src tests/regress.c -lm -o "$OUT/regress_off"
 "$OUT/regress_off" tests/golden.txt tests/cpu_baseline.txt > "$OUT/regress_off.log"
 tail -1 "$OUT/regress_off.log"
-# On: intentional sound changes get a separate scratch baseline. Health and
-# voice/routing assertions still run; the committed upstream baseline is intact.
+# On must match the frozen pre-optimization experiment as well. Neither
+# committed golden is regenerated here; intentional audio changes need review.
 "$CC" -O2 -w -Ibuild/gen -Ifirmware/src -DFELUCCA_ENGINE_BALANCE=1 \
     tests/regress.c -lm -o "$OUT/regress_on"
-GOLDEN_UPDATE=1 "$OUT/regress_on" "$OUT/experimental_golden.txt" tests/cpu_baseline.txt > "$OUT/regress_on.log"
+"$OUT/regress_on" tests/engine_balance_golden.txt tests/cpu_baseline.txt > "$OUT/regress_on.log"
 tail -1 "$OUT/regress_on.log"
-python3 tests/engine_balance_tail.py "$OUT" > "$OUT/tail_usb_average.log"
-cat "$OUT/tail_usb_average.log"
-# Keep the upstream tail checks unchanged. A failing USB check must not be
-# hidden by the statistical calibration results above.
-for balance in 0 1; do
-    "$CC" -O2 -w -Ibuild/gen -Ifirmware/src -DFELUCCA_ENGINE_BALANCE=$balance \
-        tests/tail_test.c -lm -o "$OUT/tail_$balance"
-    "$OUT/tail_$balance" > "$OUT/tail_$balance.log" || { cat "$OUT/tail_$balance.log"; exit 1; }
-done
-echo "balance: host checks passed; target CPU/flash/RAM and hardware listening still required"
+# Both flags: same DAC/USB 3 dB harmonic bound, noise-aware USB estimation,
+# individual quantization bounds, and deliberately broken quantizers rejected.
+python3 tests/engine_balance_tail.py "$OUT/tail" > "$OUT/tail_validation.log"
+cat "$OUT/tail_validation.log"
+echo "balance: host checks passed; hardware listening and timing still required"

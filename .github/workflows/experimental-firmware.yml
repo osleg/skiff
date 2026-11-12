@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   host-balance:
-    name: Host balance and unchanged tail checks
+    name: Host balance and noise-aware tail checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -48,8 +48,8 @@ jobs:
         with:
           python-version: '3.12.12'
       - name: Run host calibration, regression, UBSan and quiet-tail tests
-        # Deliberately no continue-on-error. The three known experimental USB
-        # tail failures stay red, without preventing independent firmware builds.
+        # No continue-on-error: calibration, fixed golden renders, arithmetic,
+        # DAC/USB harmonic limits and bad-quantizer rejection must all pass.
         run: |
           mkdir -p build/ci
           sh tests/run_engine_balance_tests.sh 2>&1 | tee build/ci/engine-balance.log
@@ -73,6 +73,7 @@ jobs:
           name: engine-balance-host-${{ github.sha }}
           path: |
             build/host/engine_balance/*.log
+            build/host/engine_balance/tail/*.log
             build/host/engine_balance/*.csv
             build/host/engine_balance/*.txt
             build/ci/*.log

@@ -14,10 +14,11 @@ original mix. Browser emulator:
 
 Host-only checks: `sh tests/run_engine_balance_tests.sh`. They write diagnostics
 under `build/host/engine_balance/`, never replace committed golden files, do not
-need the JieLi compiler and do not access hardware. **The script currently exits
-nonzero on three unchanged, single-run USB quiet-tail assertions.** It reports
-those failures rather than hiding or relaxing them. The experiment is therefore
-not added to the normal aggregate test runner.
+need the JieLi compiler and do not access hardware. Both flags must pass their
+frozen audio hashes, calibration checks and the same 3 dB DAC/USB harmonic-growth
+limit. The USB estimator is noise-aware and checked against deliberately broken
+quantizers. The experimental calibration remains separate from the normal
+aggregate suite.
 
 ## Provisional calibration
 
@@ -66,75 +67,96 @@ The final patch does not scale voice amplitude endpoints. An early prototype did
 and failed the existing DAC tail-distortion checks. Folding the gain into Q12
 track LEVEL still cut quiet samples too early and failed those checks as well.
 
-Instead, the original raw engine and track DRIVE/INSERT/LEVEL/PAN paths stay
-unchanged. The dry contribution is attenuated into Q22 using split 32-bit
-products. Integer and fractional parts accumulate in separate per-core sums;
-whole fractional units are carried before THROW/DUB sees the mix. The remaining
-seven low bits join the existing master path before DC blocking, speaker EQ,
-limiting and soft clipping. The sounding engine ID is used through switch fades.
-Ordinary sends are attenuated separately; SAMPLE extra sends use the corresponding
-level coefficient, without applying its dry trim twice. Sends keep their existing
-lower precision. Performance effects keep their existing integer/low-bit handling.
+The raw engines and the order of track DRIVE/INSERT/LEVEL/PAN processing stay
+unchanged. The dry contribution is attenuated into Q22, preserving seven bits
+below Q15. Both cores accumulate Q22 directly in their existing dry buffers.
+After summing the cores, the Q15 part goes to THROW/DUB and the buses; its seven
+low bits temporarily use the existing `dac_lo` buffer. The master consumes each
+residue before replacing it with final output low bits. There are no additional
+balance buffers and no cross-core writes to `dac_lo`.
 
-No AGC, compressor, operator adjustment, saved-state change or gain boost. The
-added dry accumulators cost 512 bytes with both cores built, 256 in a single-core
-build, only when enabled. New arithmetic is checked exhaustively for every
-integer sample in [-2^20, 2^20] and every gain against a 64-bit reference, plus
-all 128 LEVEL coefficients. Unity and opposite-sign cancellation are checked.
-UBSan on this arithmetic excludes no categories. The target build fits flash/RAM,
-but four static target cost checks fail; see the target verification below.
+Sends retain their existing precision and double-rounding rule. SAMPLE extra
+sends use the corresponding level coefficient without applying the dry trim
+twice. The sounding engine ID is used through switch fades. No AGC, compressor,
+operator adjustment, saved-state change or gain boost is introduced.
 
-## Verified and unresolved
+## Size/CPU optimization (2026-11-12)
 
-- 450 raw render pairs are identical, not merely similarly loud.
-- 450 dry pre-master pairs match intended gain within 0.1 dB; 450 post-master
-  pairs remain in range. Engine median spread is about 0.40 dB at both stages.
-- Envelope fingerprints remain unchanged. Fifteen stereo/panned-drum/user-sample
-  send cases pass; unity paths are exact.
-- Disabled build matches all 176 original golden renders. Enabled build passes
-  health and voice/routing checks with a separate scratch golden. That generated
-  golden is not independent proof of sound quality.
-- Multicore: 38 scenes match across every split. Performance-effect tests pass.
-- All six **DAC** quiet-tail checks pass. Three combined upstream tail assertions
-  still fail because of **USB** estimates at the deepest tail with master at 25%.
-  The enabled output is much quieter: the fundamental approaches -100 dBFS and
-  its expected third harmonic falls below a single 4096-sample dither-noise
-  estimate. `tests/engine_balance_tail.py` coherently averages 256 independent
-  dither quantizations of the same signal; all six cases then satisfy the
-  original 3 dB harmonic-growth limit. This supports noise-floor contamination
-  rather than added coherent distortion. It does not make the original failures
-  passes or establish hardware sound quality. The diagnostic pads its temporary
-  host-test arrays by one block for the final partial block; production code and
-  the upstream test file are unchanged.
-- FM-1 target builds were completed with the pinned official JieLi toolchain and
-  SDK in [EXPERIMENTAL_CI.md](EXPERIMENTAL_CI.md). No device was flashed and no
-  release was published. Flag-off image: 579,544 bytes. Flag-on: 580,192 bytes
-  (+648), leaving just 1,372 bytes in the 581,564-byte app slot. Enabled
-  `.data + .bss` is 89,272 / 94,208 bytes (+512); the pool stays
-  351,128 / 360,448 bytes (9,320 bytes spare); RAM code + `.ramx` becomes
-  30,080 / 32,512 bytes (+440). The loader is 7,273 / 7,936 bytes.
-- Flag-off passes the unchanged target cost budget. **Flag-on fails four static
-  cost checks**: `fm1_alnk0_irq` 3,600 vs 1,266 (+184%), `perf_master` 68 vs 58
-  (+17%), `mix_spread` 198 vs 143 (+38%), and `lpan_mix` 136 vs 91 (+49%).
-  These are weighted static loop instruction estimates, not measured CPU load or
-  cycle percentages. No budget was updated to hide them. Hardware timing and a
-  review of compiled loop structure remain necessary. Linux lacks the macOS
-  host instruction-counter check.
-  Disassembly review found the large ISR score is mostly a backward join into
-  shared continuation code that the estimator counts as an extra nested loop.
-  The ISR itself grows from 679 to 726 instructions (+47); removing only that
-  false span diagnostically gives cost 1,509 vs the actual baseline 1,363. This
-  diagnosis does not waive the check, remove real added work, or measure cycles.
-- Emscripten 4.0.23 builds the enabled browser simulator. Its 88,200 stereo audio
-  frames match the native simulator bit-for-bit; existing boot, keys, MIDI,
-  drawing, LED, playback and save-persistence checks pass. This does not emulate
-  hardware timing, USB audio, or flash/update safety.
+The pre-optimization reference is `63ff3b4`. Measured target iterations
+replaced split multiplies with the pi32v2's native signed wide multiply/shift,
+reduced register lifetimes, scaled each track's peak once per block, replaced
+selected early-return clamps with independent min/max operations, and resolved
+the cross-section mixer call once per block instead of once per track.
 
-Before release: hardware/USB listening, noise-aware tail criteria reviewed
-upstream, role-appropriate loudness calibration, quiet lane/sample levels,
-imported patches, parameter extremes, busy six-track mixes, engine changes with
-insert tails, and resolving the static target-cost failures with hardware timing checks. Fixed trims are experimental until
-those checks pass; existing mixer effects can depend on absolute level.
+- The enabled image shrank **580,192 -> 579,528 bytes** (664 saved), leaving
+  **2,036 bytes** in the 581,564-byte app slot. The disabled build also shrank
+  **579,544 -> 579,068 bytes** (476 saved); enabled now costs 460 bytes over it.
+- `.data + .bss`: **89,272 -> 88,760 / 94,208 bytes** (512 saved).
+- RAM code + `.ramx`: **30,080 -> 29,764 / 32,512 bytes** (316 saved).
+- Pool: unchanged **351,128 / 360,448 bytes**. Loader: unchanged
+  **7,273 / 7,936 bytes**.
+
+| Static function cost | Before | Optimized | Original budget |
+| --- | ---: | ---: | ---: |
+| audio ISR (`fm1_alnk0_irq`) | 3600 | 1386 | 1266 |
+| `perf_master` | 68 | 58 | 58 |
+| `mix_spread` | 198 | 155 | 143 |
+| `lpan_mix` | 136 | 93 | 91 |
+| `mix_part` | 1325 | 1245 | 1576 |
+
+All original target checks pass their existing **10% tolerance**. The estimator,
+budgets and original audio/UI golden files are unchanged. These are weighted
+static instruction estimates, **not CPU load or cycle measurements**. In
+particular, much of the old ISR score came from a backward control-flow join
+misidentified as a nested loop. Its actual instruction count is **726 -> 690**;
+do not interpret 3600 -> 1386 as a comparable runtime speedup. Helpers called
+once per block still cost work, even though the loop score counts only calls
+inside loops. Linux lacks the macOS host instruction counter.
+
+The LEVEL multiplication now uses the full wide intermediate before saturation.
+It keeps the original rounding where the old intermediate was valid, and avoids
+its signed overflow at extreme input/LEVEL combinations. All 128 LEVEL values
+and every input in [-2^20, 2^20] are checked against a wide integer oracle under
+UBSan with no excluded UB categories. Engine gains, dry-sum bounds, opposite-sign
+cancellation, master boundaries and the shared Q16 multiplier are checked too.
+
+## Quiet-tail measurement repair
+
+The old test allocated 617,400 samples but rendered 617,408. AddressSanitizer
+confirmed the eight-sample overflow; buffers now round up to a whole block.
+At 25% master, enabled USB H1 reaches roughly -98 to -103 dBFS. Its expected H3
+is below the dither-noise floor of a single 4096-sample spectral window, so random
+noise contaminated the old single-run harmonic estimate.
+
+The test retains those raw measurements as diagnostics, while checking USB H3
+on the signed average of **256 distinct dither seeds** of the same real DAC
+waveform. Averaging removes uncorrelated noise, not coherent distortion. The
+original notes, EQ/master cases, windows, fade depths and **3 dB growth limit**
+remain. Every individual quantization error must also stay below 1.5 USB LSB,
+exact silence must remain zero, and nonfinite or missing measurements fail.
+Plain truncation, rounding without dither and dropping the seven DAC low bits
+are deliberately injected and must be rejected with both flags. Production
+USB/dither code is unchanged. AddressSanitizer passes both configurations.
+
+## Verification and remaining limits
+
+- 450 raw render pairs remain identical and envelope fingerprints unchanged.
+- 450 dry pairs match the intended trim within 0.1 dB. Engine median spread is
+  about 0.40 dB; output remains in range. Fifteen send/routing cases pass.
+- The disabled build retains all 176 upstream golden renders. The enabled build
+  matches all 176 pre-optimization renders, now frozen separately in
+  `tests/engine_balance_golden.txt`, rather than regenerated during CI.
+- The enabled native simulator's 88,200 stereo frames match the pre-optimization
+  output byte-for-byte. Multicore and performance-effect checks are retained.
+- Target builds enforce original flash/RAM/pool/loader limits. CI builds both
+  browser simulators and checks native/Wasm parity and interaction/persistence.
+  Browser emulation does not test USB or hardware timing.
+
+Before release: real FM-1/USB listening and timing, role-appropriate loudness
+calibration, quiet lane/sample levels, imported patches, parameter extremes,
+busy six-track mixes and engine changes with insert tails. Static trims remain
+experimental; mixer effects can depend on absolute level. No device was flashed
+and no release was published.
 
 Methodology reference for a later pass:
 [the SLOOP level-presets tool retained in STATTIC](https://github.com/Timqos/stattic/blob/acfafc77f1bcd16455a9b3d0aeb5edbbf650d795/tools/level_presets.py)

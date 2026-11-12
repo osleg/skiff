@@ -180,6 +180,12 @@ static __attribute__((noinline)) AUDIO_RAM void dist_crush(track_t *t, int32_t *
     }
 }
 
+static inline int32_t mix_clip(int32_t x, int32_t limit)
+{
+    /* Two native min/max instructions, not a conditional early return. */
+    x = x < -limit ? -limit : x;
+    return x > limit ? limit : x;
+}
 /* DIST: low cut -> drive (1x..8x, exponential) -> asymmetric soft clip
  * (a little bias = even harmonics) -> tone low-pass that closes with drive ->
  * make-up gain (straight into tanh over the full band, it would sound like a
@@ -203,7 +209,7 @@ static void track_dist(track_t *t, int32_t *b, uint32_t n)
     for (i = 0; i < (int32_t)n; i++) {
         int32_t x = b[i], y;
         t->dist_hp += (x - t->dist_hp + 64) >> 7;           /* ~55 Hz low cut: keep the bass out of the clipper */
-        x = clamp(x - t->dist_hp, -230000, 230000);         /* (x >> 2) * g fits 32 bits; the clip is flat out there */
+        x = mix_clip(x - t->dist_hp, 230000);              /* (x >> 2) * g fits 32 bits; the clip is flat out there */
         y = ins_shape(IT_SOFT, (((x >> 2) * g) >> 10) + bias, 0) - b0;   /* >> 2 first: no overflow for loud poly */
         t->dist_lp1 += mulq15(y - t->dist_lp1, k);         /* two poles: tames the fizz */
         t->dist_lp2 += mulq15(t->dist_lp1 - t->dist_lp2, k);
@@ -810,20 +816,13 @@ static __attribute__((noinline)) void dly_clear(uint32_t want)   /* a 32nd of th
 /* (Skiff 1.3, as Felucca 1.6.1, after Jangada) the dry mix and the sends, as each core adds its tracks into them (mx[1]
  * is the second core's, mix_block), and a track's own block (b; mx[0].b also the fade of a reverb model change, after
  * the tracks) */
-typedef struct {
-    int32_t l[CTL], r[CTL], c[CTL], d[CTL], e[CTL], v[CTL], b[CTL];
-#if FELUCCA_ENGINE_BALANCE
-    int32_t bl[CTL], br[CTL];   /* Skiff: sub-Q15 dry contributions, carried to Q22 master */
-#endif
-} mixsum_t;   /* ((2.5) e: the delay's
+/* Skiff: with engine balance, l/r accumulate Q22 until mix_block splits off
+ * the seven fractional bits. Six tracks of at most 2^27 fit in int32_t. */
+typedef struct { int32_t l[CTL], r[CTL], c[CTL], d[CTL], e[CTL], v[CTL], b[CTL]; } mixsum_t;   /* ((2.5) e: the delay's
                                                          * right send, a stereo MODE's; d its left, or MONO's) */
 static mixsum_t mx[2];
 #define mix_l (mx[0].l)
 #define mix_r (mx[0].r)
-#if FELUCCA_ENGINE_BALANCE
-#define balance_l (mx[0].bl)
-#define balance_r (mx[0].br)
-#endif
 #define send_c (mx[0].c)
 #define send_d (mx[0].d)
 #define send_e (mx[0].e)
@@ -845,11 +844,6 @@ static int32_t part_buf[CTL];                            /* a part's block (mix_
 #define SM1_e send_e
 #define SM1_v send_r
 #define SM1_b part_buf
-#if FELUCCA_ENGINE_BALANCE
-static int32_t balance_l[CTL], balance_r[CTL];
-#define SM1_bl balance_l
-#define SM1_br balance_r
-#endif
 #endif
 
 /* the model changed (to rt): the old one's block fades out (HALL's stereo difference with it), its buffers are
@@ -892,7 +886,10 @@ static void fx_buses(const int32_t *cho_in, const int32_t *dly_in, const int32_t
         cho_mode(cho_in, wet, n, cinc);
     else
     for (i = 0; i < n; i++) {                           /* chorus: modulated short delay, 5..15 ms */
-        cho_buf[fx.cho_w & (CHO_LEN - 1u)] = (int16_t)clamp(cho_in[i] >> 1, -32768, 32767);
+        /* Skiff: independent min/max lets the target saturate without a branch. */
+        int32_t x = cho_in[i] >> 1;
+        x = x < -32768 ? -32768 : x;
+        cho_buf[fx.cho_w & (CHO_LEN - 1u)] = (int16_t)(x > 32767 ? 32767 : x);
         fx.cho_ph += cinc;
         wet[i] = cho_read(cho_sweep(0u, fx.cho_ph, depth)) << 1;   /* (Q8: read between samples) */
         fx.cho_w++;
@@ -1167,39 +1164,43 @@ static __attribute__((noinline)) void track_insert(track_t *t, int32_t *b, uint3
  * SPREAD a kit kept from another engine, hidden, spreads its hits as in 1.x until a lane is panned) */
 /* .. (2.0, #36) a panned kit's end: each channel less its far side's sum (d the left's, e the right's), then the track's
  * PAN; the sends from b, mono, as mix_part's */
-/* (2.5, #110) a track's sum x (Q15 voices, |x| < 2^20) at its LEVEL lvl (Q12, < 2^14), rounded: (x >> 2) * lvl (no
- * overflow) and the 2 bits that shift drops through their own product. Before, x >> 2 floored them away: a fading note
- * left in steps of 4, its error tied to the note. Held to 16 x full scale (never reached by music; sixteen voices at the
- * top LEVEL could), so the pans' Q12 products after it never wrap */
+/* (2.5, #110) a track's sum x at LEVEL lvl (Q12), rounded and held to
+ * 16 x full scale so the later pan products cannot wrap. Skiff: the target has
+ * a native wide multiply/accumulate and shift, smaller than two split products.
+ * This is exactly the old rounding, including negative inputs, without the
+ * split expression's intermediate-overflow restriction. */
 static inline int32_t lvl_mul(int32_t x, int32_t lvl)
 {
-    return clamp(((x >> 2) * lvl + (((x & 3) * lvl) >> 2) + 512) >> 10, -524287, 524287);
+    return mix_clip(((int32_t)(((int64_t)x * lvl) >> 11) + 1) >> 1, 524287);
 }
-/* Skiff: preserve seven fractional bits when attenuating the dry mix. Rounding
- * a normalized voice or track to Q15 early damages quiet tails (#110). Split
- * products avoid 64-bit arithmetic: |x| <= 2^20 and 0 < gain <= 32768 give |q| <=
- * 2^27. Each track contributes its integer and fractional parts to its core's
- * own sums; master_out receives them together in Q22. */
+/* Skiff: retain seven fractional bits until the master. The native wide MAC
+ * needs fewer instructions than split 32-bit products. |x| <= 2^20 and
+ * 0 < gain <= 32768 give |q| <= 2^27; NPART <= 8 leaves ample mix headroom.
+ * Both cores accumulate Q22 directly, with no per-track fractional buffers. */
 #if FELUCCA_ENGINE_BALANCE
+_Static_assert(NPART <= 8, "balanced Q22 dry sum must fit int32_t");
 static inline int32_t balance_q22(int32_t x, int32_t gain)
 {
-    return (x >> 8) * gain + (((x & 255) * gain + 128) >> 8);
-}
-static inline void balance_add(int32_t *sum, int32_t *lo, int32_t x, int32_t gain)
-{
-    int32_t q = balance_q22(x, gain);
-    *sum += q >> 7;
-    *lo += q & 127;
+    return ((int32_t)(((int64_t)x * gain) >> 7) + 1) >> 1;
 }
 static inline int32_t balance_send(int32_t x, int32_t gain)
 {
-    return (balance_q22(x, gain) + 64) >> 7;
+    /* Exactly (balance_q22(x, gain) + 64) >> 7, including double rounding. */
+    return ((int32_t)(((int64_t)x * gain) >> 7) + 129) >> 8;
 }
-#define BAL_ADD(side, i, x, gain) balance_add(&SM(side)[i], &SM(b##side)[i], (x), (gain))
+#define BAL_ADD(side, i, x, gain) (SM(side)[i] += balance_q22((x), (gain)))
 #else
 static inline int32_t balance_send(int32_t x, int32_t gain) { (void)gain; return x; }
 #define BAL_ADD(side, i, x, gain) (SM(side)[i] += (x))
 #endif
+
+/* Scale the block maximum once. Keep the wide product out of the sample
+ * loop's register lifetime (the old target compiler otherwise spills a pair). */
+static __attribute__((noinline)) AUDIO_RAM void mix_peak(track_t *t, int32_t peak, int32_t gain)
+{
+    peak = balance_send(peak, gain);
+    if (peak > t->peak) t->peak = peak;
+}
 
 /* (2.5) the delay's send *dl (Q15) of a track at PAN gains gl, gr (Q12, as its dry's): in a stereo MODE (G_DMODE) the
  * left part stays in *dl and the right one is returned (a centred track sends whole to both); MONO: *dl as it is and 0,
@@ -1218,15 +1219,13 @@ static __attribute__((noinline)) AUDIO_RAM void lpan_mix(track_t *t, const int32
 {
     int32_t lvl = LEVEL_Q12[t->p[P_LEVEL] & 127], gain = eng_balance_gain(t), pan = t->p[P_PAN];
     int32_t gl = 4096 - (pan > 0 ? pan * 64 : 0), gr = 4096 + (pan < 0 ? pan * 64 : 0);
-    int32_t c = t->p[P_CHOR] * 258, dl = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = t->peak, de;
+    int32_t c = t->p[P_CHOR] * 258, dl = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = 0, de;
     int32_t xmax = c > dl ? c : dl;
     uint32_t i;
     xmax = 0x7FFFFFFF / ((xmax > r ? xmax : r) | 1);
     de = dly_send_r(&dl, gl, gr);
     for (i = 0; i < n; i++) {
-        int32_t x = lvl_mul(b[i], lvl), a = x < 0 ? -x : x, xs = balance_send(clamp(x, -xmax, xmax), gain);
-        int32_t yl = lvl_mul(d[i], lvl), yr = lvl_mul(e[i], lvl);
-        a = balance_send(a, gain);
+        int32_t x = lvl_mul(b[i], lvl), a = x < 0 ? -x : x, xs = balance_send(mix_clip(x, xmax), gain);
         if (a > pk)
             pk = a;
         if (c)
@@ -1237,10 +1236,11 @@ static __attribute__((noinline)) AUDIO_RAM void lpan_mix(track_t *t, const int32
             SM(e)[i] += mulq15(xs, de);
         if (r)
             SM(v)[i] += mulq15(xs, r);
-        BAL_ADD(l, i, ((x - yl) * gl + 2048) >> 12, gain);
-        BAL_ADD(r, i, ((x - yr) * gr + 2048) >> 12, gain);
+        BAL_ADD(l, i, ((x - lvl_mul(d[i], lvl)) * gl + 2048) >> 12, gain);
+        BAL_ADD(r, i, ((x - lvl_mul(e[i], lvl)) * gr + 2048) >> 12, gain);
     }
-    t->peak = pk;
+    pk = balance_send(pk, gain);
+    if (pk > t->peak) t->peak = pk;
 }
 static __attribute__((noinline)) AUDIO_RAM void mix_spread(track_t *t, int32_t *b, uint32_t n SM_DECL)
 {
@@ -1251,7 +1251,7 @@ static __attribute__((noinline)) AUDIO_RAM void mix_spread(track_t *t, int32_t *
     int32_t gla = 4096 - (pa > 0 ? pa * 64 : 0), gra = 4096 + (pa < 0 ? pa * 64 : 0);
     int32_t glb = 4096 - (pb > 0 ? pb * 64 : 0), grb = 4096 + (pb < 0 ? pb * 64 : 0);
     int32_t glm = (gla + glb) >> 1, grm = (gra + grb) >> 1, gld = (gla - glb) >> 1, grd = (gra - grb) >> 1;
-    int32_t c = t->p[P_CHOR] * 258, dl = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = t->peak, de;
+    int32_t c = t->p[P_CHOR] * 258, dl = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = 0, de;
     int32_t xmax = c > dl ? c : dl;
     xmax = 0x7FFFFFFF / ((xmax > r ? xmax : r) | 1);
     de = dly_send_r(&dl, glm, grm);                     /* ((2.5) a stereo MODE: by the spread's middle) */
@@ -1285,8 +1285,7 @@ static __attribute__((noinline)) AUDIO_RAM void mix_spread(track_t *t, int32_t *
     }
     for (i = 0; i < n; i++) {
         int32_t x = lvl_mul(b[i], lvl), a = x < 0 ? -x : x, y = lvl_mul(d[i], lvl);
-        int32_t xs = balance_send(clamp(x, -xmax, xmax), gain);
-        a = balance_send(a, gain);
+        int32_t xs = balance_send(mix_clip(x, xmax), gain);
         if (a > pk)
             pk = a;
         if (c)
@@ -1300,7 +1299,7 @@ static __attribute__((noinline)) AUDIO_RAM void mix_spread(track_t *t, int32_t *
         BAL_ADD(l, i, ((x * glm + 2048) >> 12) + ((y * gld + 2048) >> 12), gain);   /* ((2.5) rounded) */
         BAL_ADD(r, i, ((x * grm + 2048) >> 12) + ((y * grd + 2048) >> 12), gain);
     }
-    t->peak = pk;
+    AUDIO_FAR(mix_peak)(t, pk, gain);
 }
 
 /* (Skiff, #21) a voice on a user sample's sound (eng_sample.c usr_mix; voice.c track_render, track k): rendered at the
@@ -1400,7 +1399,7 @@ static void mix_part(track_t *t, uint32_t n SM_DECL)
     {
         int32_t lvl = LEVEL_Q12[t->p[P_LEVEL] & 127], gain = eng_balance_gain(t), pan = t->p[P_PAN];
         int32_t gl = 4096 - (pan > 0 ? pan * 64 : 0), gr = 4096 + (pan < 0 ? pan * 64 : 0);
-        int32_t c = t->p[P_CHOR] * 258, d = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = t->peak, de;
+        int32_t c = t->p[P_CHOR] * 258, d = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = 0, de;
         int32_t xmax = c > d ? c : d;
         xmax = 0x7FFFFFFF / ((xmax > r ? xmax : r) | 1);   /* sends: loud chords at a high LEVEL */
         de = dly_send_r(&d, gl, gr);                    /* ((2.5) a stereo MODE: the delay's send by the PAN) */
@@ -1414,9 +1413,8 @@ static void mix_part(track_t *t, uint32_t n SM_DECL)
             duck_apply((uint32_t)(t - trk), b, n);      /* (Skiff) duck.c: under its source's hits */
         for (i = 0; i < n; i++) {
             int32_t x = lvl_mul(b[i], lvl), a = x < 0 ? -x : x;   /* ((2.5, #110) rounded, no bits lost) */
-            int32_t xs = balance_send(clamp(x, -xmax, xmax), gain);         /* sends: mulq15 would overflow */
-            a = balance_send(a, gain);
-            if (a > pk)
+            int32_t xs = balance_send(mix_clip(x, xmax), gain);         /* sends: mulq15 would overflow */
+                if (a > pk)
                 pk = a;
             if (c)
                 SM(c)[i] += mulq15(xs, c);
@@ -1429,7 +1427,7 @@ static void mix_part(track_t *t, uint32_t n SM_DECL)
             BAL_ADD(l, i, (x * gl + 2048) >> 12, gain);
             BAL_ADD(r, i, (x * gr + 2048) >> 12, gain);
         }
-        t->peak = pk;
+        AUDIO_FAR(mix_peak)(t, pk, gain);
     }
     if (MOD(t).on)
         mod_end(t);                                     /* the stored values back */
@@ -1457,9 +1455,6 @@ static AUDIO_RAM void c1_parts(uint32_t arg)            /* arg: the tracks (bit 
     mixsum_t *sm = &mx[1];
     for (i = 0; i < n; i++)
         sm->l[i] = sm->r[i] = sm->c[i] = sm->d[i] = sm->e[i] = sm->v[i] = 0;
-#if FELUCCA_ENGINE_BALANCE
-    for (i = 0; i < n; i++) sm->bl[i] = sm->br[i] = 0;
-#endif
     for (i = 0; i < NPART; i++)
         if (arg >> i & 1u)
             mix_part(&trk[i], n, sm);
@@ -1495,7 +1490,7 @@ static __attribute__((noinline)) uint32_t mix_split(void)
  * low MASTER reached the DAC in coarse steps, its error tied to the note (#110) */
 static inline int32_t master_q22(int32_t x, int32_t mg)
 {
-    return ((x >> 2) * mg + (((x & 3) * mg) >> 2)) >> 3;
+    return (int32_t)(((int64_t)x * mg) >> 5);   /* Skiff: exact native wide multiply/shift */
 }
 
 /* the master with the FX layer's effects between its level and master_out (perform.c) */
@@ -1507,8 +1502,8 @@ static __attribute__((noinline)) AUDIO_RAM void perf_master(int32_t *out, uint32
     for (i = 0; i < n; i++) {                           /* ((2.5) as mix_block: the Q15 part to the effects, the 7 bits */
         int32_t l = master_q22(mix_l[i] + wet[i], mg), r = master_q22(mix_r[i] + wet[i], mg);   /* under it kept: */
 #if FELUCCA_ENGINE_BALANCE
-        l += (balance_l[i] * mg) >> 12;
-        r += (balance_r[i] * mg) >> 12;
+        l += (dac_lo[2u * i] * mg) >> 12;
+        r += (dac_lo[2u * i + 1u] * mg) >> 12;
 #endif
         mix_l[i] = l >> 7;                              /* a sample the effects leave is mix_block's to the bit) */
         mix_r[i] = r >> 7;
@@ -1533,9 +1528,6 @@ static void mix_block(int32_t *out, uint32_t n)
     int32_t mg = fx_usb_fixed ? MASTER_FULL : (int32_t)song.master_q12;   /* (USB LEVEL FIXED: MASTER after) */
     for (i = 0; i < n; i++)
         send_c[i] = send_d[i] = send_e[i] = send_r[i] = mix_l[i] = mix_r[i] = 0;
-#if FELUCCA_ENGINE_BALANCE
-    for (i = 0; i < n; i++) balance_l[i] = balance_r[i] = 0;
-#endif
     if (thr_out)
         throw_on(n);                                    /* (Skiff) the throws on for the block, its events too */
     events_block(n);
@@ -1547,9 +1539,11 @@ static void mix_block(int32_t *out, uint32_t n)
         if (m && !C1_RUN(c1_parts, m | n << 8))
             m = 0;
         c1_blocks += m != 0;
+        /* Skiff: resolve the cross-section call once per block, not per track. */
+        void (*part)(track_t *, uint32_t, mixsum_t *) = AUDIO_FAR(mix_part);
         for (i = 0; i < NPART; i++)
             if (!(m >> i & 1u))
-                AUDIO_FAR(mix_part)(&trk[i], n, &mx[0]);
+                part(&trk[i], n, &mx[0]);
         if (m) {
             const mixsum_t *sm = &mx[1];
             if (C1_WAIT())                              /* it stopped answering (held from now on): its tracks here */
@@ -1557,10 +1551,6 @@ static void mix_block(int32_t *out, uint32_t n)
             for (i = 0; i < n; i++) {
                 mix_l[i] += sm->l[i];
                 mix_r[i] += sm->r[i];
-#if FELUCCA_ENGINE_BALANCE
-                balance_l[i] += sm->bl[i];
-                balance_r[i] += sm->br[i];
-#endif
                 send_c[i] += sm->c[i];
                 send_d[i] += sm->d[i];
                 send_e[i] += sm->e[i];
@@ -1575,13 +1565,14 @@ static void mix_block(int32_t *out, uint32_t n)
         mix_part(&trk[i], n);
 #endif
 #if FELUCCA_ENGINE_BALANCE
-    /* Carry whole units from track fractions before THROW/DUB reads the dry
-     * sum. This also leaves each master residue in 0..127 on either core. */
+    /* THROW/DUB and the buses expect Q15. Reuse the output's low-bit buffer:
+     * master/perf_master reads each residue before replacing it with output.
+     * No second-core access and no new RAM. Integer sums make every split exact. */
     for (i = 0; i < n; i++) {
-        mix_l[i] += balance_l[i] >> 7;
-        mix_r[i] += balance_r[i] >> 7;
-        balance_l[i] &= 127;
-        balance_r[i] &= 127;
+        dac_lo[2u * i] = (uint8_t)(mix_l[i] & 127);
+        dac_lo[2u * i + 1u] = (uint8_t)(mix_r[i] & 127);
+        mix_l[i] >>= 7;
+        mix_r[i] >>= 7;
     }
 #endif
     if (thr_on)
@@ -1598,8 +1589,8 @@ static void mix_block(int32_t *out, uint32_t n)
     for (i = 0; i < n; i++) {
         int32_t l = master_q22(mix_l[i] + wet[i], mg), r = master_q22(mix_r[i] + wet[i], mg);   /* ((2.5, #110) Q22) */
 #if FELUCCA_ENGINE_BALANCE
-        l += (balance_l[i] * mg) >> 12;
-        r += (balance_r[i] * mg) >> 12;
+        l += (dac_lo[2u * i] * mg) >> 12;
+        r += (dac_lo[2u * i + 1u] * mg) >> 12;
 #endif
         master_out(&l, &r);
         out[2u * i] = l >> 7;

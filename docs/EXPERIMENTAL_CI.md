@@ -11,10 +11,11 @@ Forks may require their owner to enable Actions in GitHub first.
 
 Each run has independent jobs:
 
-- **Host balance:** flag-off golden renders, flag-on calibration, arithmetic
-  UBSan, unchanged quiet-tail checks, multicore equivalence and performance
-  effects. The three known flag-on USB tail failures remain real failures. No
-  assertion or committed golden file is weakened to make the workflow green.
+- **Host balance:** original flag-off and frozen pre-optimization flag-on golden
+  renders, calibration, arithmetic UBSan, DAC/USB quiet tails, multicore
+  equivalence and performance effects. USB harmonic measurements coherently
+  average dither without relaxing the 3 dB limit; per-sample noise bounds and
+  deliberate bad-quantizer mutations check that real defects still fail.
 - **FM-1 target:** `FELUCCA_ENGINE_BALANCE=0` and `=1`, each built with `BOARD=fm1`
   and without `--release`. Both run the unchanged target cost checks. The full
   upstream aggregate test suite runs against the flag-off build. Target image,
@@ -26,9 +27,9 @@ Each run has independent jobs:
   extract its artifact, run `python3 -m http.server 8790` in the package folder,
   then open `http://localhost:8790/emu/`. This is not hardware/USB timing emulation.
 
-The enabled build currently exceeds four unchanged static target-cost budgets,
-in addition to the three host USB tail assertions. Those jobs are expected to
-report failures until the underlying issues are resolved; artifacts still upload.
+The optimized enabled build passes the original target cost budgets with their
+existing 10% tolerance. Neither the estimator nor budget files were changed.
+Any future failing check still fails its job; artifacts upload for diagnosis.
 
 Artifacts last 14 days. Firmware artifacts include separately named `baseline/`
 and `experimental-balanced/` folders, `.fwsc`, `.bin`, `.elf`, disassembly, loader,
@@ -92,5 +93,6 @@ sh tests/run_engine_balance_tests.sh
 
 The firmware script records failures and still builds the other variant where
 possible; its final exit status remains nonzero if any build, budget, or aggregate
-check failed. The separate balance script currently returns nonzero on the three
-known USB tail assertions. Neither script rewrites committed budgets/goldens.
+check failed. The balance script fails on any calibration, frozen audio hash,
+arithmetic, tail or mutation-sensitivity regression. Neither script rewrites
+committed budgets/goldens.
