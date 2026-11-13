@@ -404,7 +404,7 @@ def input_key(have_cc0):
     here = Path(__file__).resolve().parent
     for p in (here / "gen_samples.py", here / "sampleio.py"):
         h.update(p.read_bytes())
-    h.update(repr((sys.version_info[:2], have_cc0, slice_on())).encode())   # sum() differs across versions
+    h.update(repr((sys.version_info[:2], have_cc0, slice_on(), os.environ.get("FELUCCA_FACTORY_SAMPLES", "1"))).encode())   # sum() differs across versions
     files = sorted(BREAKS.glob("*.wav"))
     if have_cc0:
         files += sorted(CC0.glob("*/*.wav"))
@@ -415,7 +415,7 @@ def input_key(have_cc0):
 
 
 def main(out):
-    have_cc0 = CC0.exists() and any(CC0.glob("*/*.wav"))
+    have_cc0 = os.environ.get("FELUCCA_FACTORY_SAMPLES", "1") != "0" and CC0.exists() and any(CC0.glob("*/*.wav"))
     if not have_cc0:
         print("samples: CC0 library not fetched (tools/fetch_cc0.py) - no SAMPLE sets")
     key = input_key(have_cc0)
@@ -434,6 +434,15 @@ def main(out):
                 b.alias_set(name)
             else:
                 b.cc0_set(name, kind)
+    elif os.environ.get("FELUCCA_FACTORY_SAMPLES", "1") == "0":
+        # Preserve set IDs 0..4 and therefore USR1..3 IDs 5..7 in old projects.
+        # Empty factory placeholders contain no audio; slot flash is untouched.
+        for name, kind in CC0_SETS:
+            if kind == "alias":
+                b.alias_set(name)
+            else:
+                b.sets.append((name, 0, 0))
+                b.kinds[name] = kind
     if slice_on():                                  # SLICE's loops: only when that engine is built
         b.brk = b.slice_loop("break")               # last: the sets' offsets stay as they were
         b.fnk = b.slice_loop("funk")

@@ -981,9 +981,16 @@ static void ed_service(void)
 {
     const uint8_t *p;
     uint32_t n;
+#if FELUCCA_CAFA
+    if (!cafa_audio_on) ed_sync();
+    if (!ota_frame_get(&p,&n)) return;
+    if (cafa_frame(p,n) || cafa_audio_on) { ota_frame_done(); return; }
+    if (n<4u || p[0]!=ED_HDR0 || p[1]!=ED_HDR1 || p[2]!=ED_HDR2) return;
+#else
     ed_sync();                                             /* v2 pushes (while watched) */
     if (!ota_frame_get(&p, &n) || n < 4u || p[0] != ED_HDR0 || p[1] != ED_HDR1 || p[2] != ED_HDR2)
         return;
+#endif
     ed_w.last_ms = fm1_ms;                                 /* any request keeps WATCH alive */
     if (p[3] >= ED_SMP_BEGIN) {                            /* large frames: handled in place, then freed */
         if (p[3] == ED_SMP_MIX && n > 4u)

@@ -88,6 +88,12 @@ static void scene_store(uint32_t s);
 static int stage_pending(void);
 static void project_cur_name(char *b);
 static uint32_t project_mark(void);   /* (Skiff U3, A2) project.c: the slot's letter ('A'..'D', 0 none) | changed << 8 */
+#if FELUCCA_CAFA
+/* Only non-null during a bounded, read-only native-page projection. */
+static const uint8_t *cafa_native_view __attribute__((section(".bss.cafa_ui")));
+static uint8_t cafa_native_v4 __attribute__((section(".bss.cafa_ui")));
+static const char *const cafa_page_names[]={"HOME","SEQ","SOUND","ENV","FX","MIX","LFO","ARP","PATTERN"};
+#endif
 static int project_dirty(void);
 static int project_changed(void);
 static uint32_t user_of(const track_t *t)    /* user preset slot its sound came from, UP_SLOTS = none */

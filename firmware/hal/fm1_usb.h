@@ -116,3 +116,6 @@ FM1_INLINE uint32_t fm1_usb_sof_take(void)
     FM1_USB_CON0 |= 1u << 12;
     return 1;
 }
+
+/* EP4 OUT has its own DMA address slot, independent of EP4 IN. */
+FM1_INLINE void fm1_usb_ep4_rxbuf(void *p) { FM1_USB_EP4_RADR = (uint32_t)(uintptr_t)p; }

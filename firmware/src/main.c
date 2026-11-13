@@ -298,7 +298,11 @@ static void fm1_main(void)
              * go cancels it */
             static uint32_t t0;
             uint32_t both = (1u << panel.btn[B_OCTDN]) | (1u << panel.btn[B_OCTUP]);
-            if ((fm1_in.buttons & both) != both) {
+            if ((fm1_in.buttons & both) != both
+#if FELUCCA_CAFA
+                || cafa_audio_on || cafa_release_guard
+#endif
+            ) {
                 if (ui.uboot) {
                     ui.uboot = 0;
                     ui.force = 1;                       /* what the countdown covered */
@@ -357,8 +361,14 @@ static void fm1_main(void)
 #if BOARD_SMK37
         smk_ui_frame();                               /* the SMK-37's own controls (smk_ui.c) */
 #endif
+#if FELUCCA_CAFA
+        if (!cafa_audio_on) {
+#endif
         settings_poll();                              /* queued settings save: only while stopped */
         autosave_poll();                              /* (1.2) the music, stopped and idle: project.c */
+#if FELUCCA_CAFA
+        }
+#endif
         felucca_dbg.stage = 2;
         ui_leds();
 #if BOARD_SMK37

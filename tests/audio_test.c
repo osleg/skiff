@@ -24,6 +24,11 @@ static int32_t host_tap[2 * 64];
 static uint32_t host_tap_n;
 static void uac_tap(const int32_t *out, const uint8_t *lo, uint32_t n) { (void)lo; memcpy(host_tap, out, 8u * n); host_tap_n = n; }
 static void uac_render_start(void) {}
+#ifdef HOST_UAC_RETURN
+/* A CAFA ISR test supplies uac_play after hostsim's non-audio USB setup. */
+#undef FELUCCA_UAC_OUT
+#define FELUCCA_UAC_OUT 1
+#endif
 #include "../firmware/src/audio.c"
 enum { FM1_ADC_BATT = 3, FM1_ADC_MASTER = 4 };
 static int32_t host_pot = 1023;                        /* the MASTER pot as the ADC reads it (-1: timeout) */
@@ -280,6 +285,7 @@ static void boot_keys(void)
           ref > 100.0 && fabs(quiet - ref) < 1e-9 && silent == 0.0);
 }
 
+#ifndef AUDIO_TEST_NO_MAIN
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -289,3 +295,5 @@ int main(void)
     printf(bad ? "audio: %d FAILED\n" : "audio: all passed\n", bad);
     return bad != 0;
 }
+
+#endif /* AUDIO_TEST_NO_MAIN */

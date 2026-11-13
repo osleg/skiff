@@ -26,6 +26,22 @@ static uint32_t audio_cpu_rem;                         /* keep the fractional II
 static int16_t scope_buf[SCOPE_N];
 static uint32_t scope_w;
 
+#if FELUCCA_CAFA
+/* Keep the phone-only path out of the standalone ISR's inlined DSP body. */
+static __attribute__((noinline)) void cafa_audio_block(int32_t *out, uint32_t n)
+{
+    /* No local engines, sequencer, click or effects. USB return is the sole DAC source.
+     * USB capture is not tapped: no phone->Skiff->phone audio feedback loop. */
+    mi_r=mi_w;
+    /* Continue owed note-offs without running the standalone clock/sequencer. */
+    if (mn.lost) { mn.lost=0; mo_flush((1u<<NTRK)-1u); }
+    memset(out,0,n*2u*sizeof *out);
+#if FELUCCA_UAC_OUT
+    uac_play(out,n,(uint32_t)song.master_q12/2u);
+#endif
+}
+#endif
+
 static void audio_block(int32_t *out, uint32_t n)       /* mix (fx.c), then Q15 -> 24 bit */
 {
     uint32_t i;
@@ -113,6 +129,14 @@ void fm1_alnk0_irq(void)                       /* via isr_alnk0 (hal/fm1_isr.S) 
         }
 #if FELUCCA_UAC
         uac_render_start();
+#endif
+#if FELUCCA_CAFA
+        /* Mode changes are main-loop only, with the ISR excluded. One decision
+         * per DMA half avoids putting the phone branch in every DSP sub-block. */
+        if (cafa_audio_on) {
+            mo.tick = t0 + HALF_FRAMES * DAC_TICKS;
+            cafa_audio_block(o,HALF_FRAMES);
+        } else
 #endif
         for (b = 0; b < HALF_FRAMES; b += CTL) {
             mo.tick = t0 + (HALF_FRAMES + b) * DAC_TICKS;   /* when this block plays ((2.2) MIDI OUT, usb.c; seq.c kb_lat) */

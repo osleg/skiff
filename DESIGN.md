@@ -702,3 +702,20 @@ change existing mixes; disabling the flag restores the original rendering. No
 project format or setting changes. These provisional gains balance factory
 preset medians, not every preset or arbitrary user sample. See
 [the calibration notes](docs/ENGINE_BALANCE.md) for measurements and known limits.
+
+
+## CAFA experimental companion mode (opt-in build)
+
+CAFA on Android is the authority for its six tracks, sound engines, 1–1024-step patterns, names, parameters and transport. The FM-1 is a bounded display/controller client, not a second sequencer. CAFA never replaces the standalone project's sounds, patterns or saved music. A valid protocol handshake plus complete state snapshot activates companion mode; USB attachment alone does not. The FM-1 stops all local voices/transport and sends physical intents (button/key held states and relative encoders). Android returns complete, revisioned display/LED snapshots. Long timelines are a 16-step viewport, not coerced into Skiff's 64-step storage. Skiff's physical MASTER controls returned USB audio gain.
+
+Each applied STATE is acknowledged immediately, as are HELLO and HEARTBEAT. The Android sender emits at most one frame per timer tick, giving due heartbeats priority over a snapshot and retrying HELLO while negotiating. This respects the firmware's single completed-SysEx mailbox: a heartbeat must not depend on surviving directly behind a snapshot. Newer identical snapshots renew/acknowledge the lease without forcing another full display clear. The 1500 ms fail-closed timeout remains unchanged.
+
+The current proxy display clears fully only on a fresh takeover. Subsequent changes update only affected fields or cells, compared with the last snapshot actually rendered. Physical LED-only changes cause no LCD transfers. This repaint rule does not make the proxy display equivalent to Skiff's native page renderer or restore unimplemented interactions; that remains a separate requirement.
+
+This first slice uses familiar HOME, SEQ, SOUND, ENV, FX and MIX pages and four labeled knob values, selected by CAFA. It is not a complete emulation of every existing Skiff page, modifier, song, arp or record mode. The standalone renderer/inputs remain unchanged outside the opt-in session. Companion mode bypasses the local DSP, click and effects and outputs only USB playback, without looping that playback into USB capture. Timeout, USB loss, goodbye, encoder overflow or transmit congestion returns to standalone stopped, silences old voices and suppresses held controls until released. It never resumes a saved song unexpectedly. See docs/CAFA.md for tested scope and hardware qualification still required.
+
+### Loom native companion v4
+
+Loom v4 extends the same 92-byte snapshot to eight phone tracks and nine pages (HOME, SEQ, SOUND, ENV, FX, MIX, LFO, ARP, PATTERN). It uses the actual Skiff BLOCKS header, knob cards and footer with a transient, read-only view. No companion snapshot changes standalone parameter, step, project, user-sample or preset storage. Track labels explicitly say T1–T8. Phone transport, BPM (12–300) and octave (-3–+3) are authoritative. Numeric card units are Loom units; they are never formatted through Skiff's parameter descriptors. FX UNITY is read-only. REC remains unavailable in the current app.
+
+The 16-step display is an occupancy bitmap; pitches and note lengths are not present and are not invented. ENV PREVIEW uses Loom's cubic controls and exponential decay/release, not Skiff timing. Its sustain duration and key release are hypothetical; SoundFont's own sample envelope can additionally affect audible output. Legacy v1 proxy and v2 native Skiff ENV are unchanged, and Loom v3 is retained as an eight-track proxy protocol.

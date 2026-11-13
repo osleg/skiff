@@ -84,18 +84,30 @@ static int head_mark_short(char *b)
 /* the title at the header's right: SHIFT's map; (2.5) a FREE TAKE's picker; HOME: the project's name (pn); the page's */
 static const char *head_title(const char *pn)
 {
+    #if FELUCCA_CAFA
+    if (cafa_native_view && cafa_native_v4) return cafa_page_names[cafa_native_view[1]];
+    #endif
     return ui.shift ? "SHIFT" : fr.on ? "FREE TAKE" : ui.home ? pn : page_head();
 }
 static void draw_head_blocks(void)
 {
     const track_t *t = TSEL;
     uint32_t rec = (song.rec >> song.sel) & 1u ? 2u : song.rec != 0u, id, sig;
+    uint32_t pm =
+#if FELUCCA_CAFA
+        cafa_native_view ? 0 :
+#endif
+        project_mark();
     int msg = ui.msg_t || ui.layer;
     char pos[12] = "1.1", b[8], pn[16], mk[16];      /* (stopped: PLAY starts from the top) */
     uint32_t s_k, s_at, s_n = lists.song && song.playing ? song_at(&s_k, &s_at) : 0u;   /* ((2.5, 2B) the song strip) */
     int32_t x, lx;
     uint16_t ic;
     int mark = head_mark(mk);                        /* ((Skiff phase 5) SONG ON, the pattern edited) */
+    #if FELUCCA_CAFA
+    if (cafa_native_view) { pn[0]=0; s_n=0; }
+    else
+#endif
     project_cur_name(pn);                            /* (HOME's title) */
     if (song.playing) {                              /* (in time: REV, PING, RAND count up too) */
         fmt_int(pos, (int32_t)(seq_at(t) / 16u) + 1);
@@ -114,7 +126,7 @@ static void draw_head_blocks(void)
           (uint32_t)(song.octave + 8) * 11u +
           (uint32_t)batt_shown() * 7777u + 0xB10C5u +
           str_hash(9u + (uint32_t)ui.home, head_title(pn)) +   /* (the title) */
-          (mark ? str_hash(3u + song.sel, mk) : 0u) + project_mark() * 104729u +
+          (mark ? str_hash(3u + song.sel, mk) : 0u) + pm * 104729u +
           (s_n ? s_n * 31u + 240u * s_at / s_n * 7919u + s_k : 0u);
     ui.roll_bpm = song.g[G_BPM];                      /* (no rolling digits: none left to finish in another style) */
     ui.roll[ROLL_BPM].from[0] = 0;
@@ -142,7 +154,11 @@ static void draw_head_blocks(void)
     GFX_HOOK_ALIGN(0, 0, 0, H_HEAD, AL_V, "header text on its middle");
     if (ux.neon)                                      /* ((Skiff N2) NEON: slanted) */
         cv_fx_on(HEAD_MY, &AF_M, 0);
-    x = cv_text(HB_BPM_X, HEAD_MY, &AF_M, b, ui.bpm_t ? T_ACCENT : T_THEME) + (ux.neon ? cv_fx_w(&AF_M) : 0);
+    x = cv_text(
+#if FELUCCA_CAFA
+                cafa_native_view ? HB_BPM_X+20 :
+#endif
+                HB_BPM_X, HEAD_MY, &AF_M, b, ui.bpm_t ? T_ACCENT : T_THEME) + (ux.neon ? cv_fx_w(&AF_M) : 0);
     cv_fx_off();
     GFX_HOOK_ALIGN(0, 0, 0, HEAD_MY + AF_M.asc, AL_B, "BPM on its value's baseline");
     x = cv_text(x + 3, HEAD_MY + AF_M.asc - AF_S.asc, &AF_S, "BPM", T_MID);
@@ -179,7 +195,7 @@ static void draw_head_blocks(void)
             GFX_HOOK_ALIGN(0, 0, 0, H_HEAD, AL_V, "header text on its middle");
             x = cv_text_r(r, HEAD_SY, &AF_S, h, T_MID, T_BG) - 8;
         }
-        if ((id = project_mark()) != 0u) {            /* ((Skiff U3, A2) the project: its letter in a box before the
+        if ((id = pm) != 0u) {            /* ((Skiff U3, A2) the project: its letter in a box before the
                                                         * title, a dot on its corner while it changed since saved or
                                                         * loaded) */
             char pl[2] = {(char)(id & 0xFFu), 0};

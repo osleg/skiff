@@ -164,3 +164,12 @@ cd /tmp/felucca-site && python3 -m http.server 8000
 
 Installing firmware is at your own risk. If an install fails and the FM-1 no longer
 starts, recovery needs [FM-1-transporter](https://github.com/kurogedelic/FM-1-transporter).
+
+## Experimental CAFA companion
+
+`FELUCCA_CAFA=1 FELUCCA_CDC=0 FELUCCA_ENGINE_BALANCE=1 ./build.sh` builds the FM-1 companion surface plus USB playback, retaining standalone engines. CAFA is off by default. See [prototype scope and verification](docs/CAFA.md), [wire protocol](docs/CAFA_PROTOCOL.md) and [USB details](docs/CAFA_USB.md). Not hardware-qualified; do not flash without a backup and an explicit hardware test plan.
+
+For Loom v4's expanded native companion pages, use the configuration in
+[LOOM_V4.md](docs/LOOM_V4.md). `FELUCCA_FACTORY_SAMPLES=0` omits compiled factory
+instrument samples to free flash; user sample slots and uploads are retained.
+This is optional and defaults to the original factory sample set.

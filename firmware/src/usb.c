@@ -1,5 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
+/* Playback descriptors, EP4 OUT setup and ring control adapted from
+ * hugelton/felucca-bsp chip/usb.c, d18879ba557531f921752780607bf1a882dc801a.
+ * Original source: MPL-2.0, Copyright (C) 2026 Leo Kuroshita (@kurogedelic),
+ * Hügelton Instruments; Copyright (C) 2026 Kerem Kilic (Ellic Studio), USB host integration.
+ * MPL text: LICENSES/MPL-2.0-felucca-bsp.txt. The original source bears no
+ * Incompatible With Secondary Licenses notice; see MPL-2.0 section 3.3.
+ * See docs/CAFA_USB.md for provenance and the local fixed-point changes. */
 /* USB full-speed device on USB0: a
  * class-compliant USB-MIDI interface. All SIE traffic happens in one place,
  * usb_poll(), called from the TIMER5 ISR at 2 kHz, so INDEX is never shared
@@ -28,6 +35,20 @@
 #endif
 #ifndef FELUCCA_UAC
 #define FELUCCA_UAC 0
+#endif
+#ifndef FELUCCA_CAFA
+#define FELUCCA_CAFA 0
+#endif
+#ifndef FELUCCA_UAC_OUT
+#define FELUCCA_UAC_OUT FELUCCA_CAFA
+#endif
+#if !FELUCCA_UAC
+#undef FELUCCA_UAC_OUT
+#define FELUCCA_UAC_OUT 0
+#endif
+#define UAC_NCH 2u
+#ifndef UO_N
+#define UO_N 1024u
 #endif
 #ifndef FELUCCA_UAC_48K
 #define FELUCCA_UAC_48K 1
@@ -128,6 +149,26 @@ static struct {
     uint32_t fill_lo, fill_hi;                   /* range of fill_min since the stream started */
     uint32_t rate_sets;                          /* SET_CUR sampling frequency requests */
 } uac;
+#if FELUCCA_UAC_OUT
+/* USB audio output: the packets in a ring (16-bit L | R << 16), read by uac_play at the I2S clock */
+#define UO_MAXF 49u              /* frames in the largest packet the host may send (44.1: 44 or 45) */
+#define UO_MAXP (UO_MAXF * 4u)
+#define UO_TGT 256u             /* ~5.8 ms at 44.1 kHz; HALF_FRAMES is 128 */
+#if UO_N < 512 || (UO_N & (UO_N - 1))
+#error "UO_N must be a power of two >= 512"
+#endif
+static uint32_t uo_ring[UO_N];
+static volatile uint32_t uo_w, uo_r;
+static uint32_t ep4rx[UO_MAXF + 1u] __attribute__((aligned(4)));
+static struct {
+    volatile uint8_t alt;        /* the output's streaming interface: 1 = the host plays */
+    uint8_t go;                  /* primed: uac_play reads the ring */
+    volatile uint32_t generation, reset_w, seen_generation; /* stream reset handshake */
+    uint32_t pos;                /* the read position's fraction, Q16 */
+    int32_t err_q16;             /* smoothed fill error, Q16 frames */
+    uint32_t pkts, frames, underruns, overruns, starts;
+} uo;
+#endif
 #if FELUCCA_UAC_48K
 #include "uac_fir.h"
 /* the resampler's input history: the last 32 frames, written twice so a window of UAC_FIR_N never wraps */
@@ -355,26 +396,55 @@ static __attribute__((noinline)) void mo_trs(uint32_t now)
 #else
 #define FMT_LEN 0
 #endif
-#if FELUCCA_UAC
-/* the AC header's collection (Felucca #67): the audio streaming interface first, then the MIDI one. The kernel
- * AppleUSBAudio (macOS up to 15; AUAConfigurationDictionary::parseConfigurationDescriptor) drops a MIDI streaming
- * interface from the collection while it walks it with the count from bInCollection: with MIDI listed first, the
- * next look-up runs past the shortened list, the parser gives up before the audio streaming interface and no
- * audio device appears (MIDI still works). Listed last, MIDI is dropped at the end of the walk. The class spec
- * gives the order no meaning (Linux takes each listed interface on its own); FELUCCA_UAC_AS_FIRST=0: Skiff 1.0
- * .. 1.2's order (MIDI first). The interface numbers do not move. (2.2) That alone did not do it on macOS 13-15:
- * FELUCCA_UAC_MIDI_LAST moves the MIDI interface itself after the audio streaming one (the collection (a) + 1, (a) + 2
- * is then audio streaming, MIDI) */
-#if FELUCCA_UAC_AS_FIRST
-#define AC_COLL(a) (a) + 2, (a) + 1
+#if FELUCCA_UAC_MIDI_LAST
+#define IF_AS 1                                            /* from the audio function's first interface */
+#define IF_ASO 2
+#define IF_MIDI (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
 #else
-#define AC_COLL(a) (a) + 1, (a) + 2
+#define IF_MIDI 1
+#define IF_AS 2
+#define IF_ASO 3
 #endif
+#if FELUCCA_UAC_OUT
+#define AC_STREAMS(a) (a) + IF_AS, (a) + IF_ASO
+#else
+#define AC_STREAMS(a) (a) + IF_AS
+#endif
+#if FELUCCA_UAC_MIDI_LAST == 2
+#define AC_NCOLL (FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) AC_STREAMS(a)
+#elif FELUCCA_UAC_MIDI_LAST || FELUCCA_UAC_AS_FIRST
+#define AC_NCOLL (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) AC_STREAMS(a), (a) + IF_MIDI
+#else
+#define AC_NCOLL (1 + FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AC_COLL(a) (a) + IF_MIDI, AC_STREAMS(a)
+#endif
+#define D_AC_HEADER(a, terminals) 8 + AC_NCOLL, 0x24, 1, 0x00, 0x01, 8 + AC_NCOLL + (terminals), 0, AC_NCOLL, AC_COLL(a),
+#if FELUCCA_UAC
+#if FELUCCA_UAC_OUT
 #define D_AC(a)                                                                                      \
     9, 4, (a), 0, 0, 1, 1, 0, 0,                                                                     \
-    10, 0x24, 1, 0x00, 0x01, 31, 0, 2, AC_COLL(a),         /* AC header 1.00: audio + MIDI streaming */ \
-    12, 0x24, 2, 1, 0x03, 0x06, 0, 2, 0x03, 0x00, 0, 0,    /* input terminal 1: line, 2 ch (L R) */      \
+    D_AC_HEADER((a), 42)                                   /* AC header: MIDI, both streams */          \
+    12, 0x24, 2, 1, 0x03, 0x06, 0, UAC_NCH, 0x03, 0x00, 0, 0,   /* input terminal 1: line, L R (+ the app's) */      \
+    9, 0x24, 3, 2, 0x01, 0x01, 0, 1, 0,                    /* output terminal 2: USB streaming, from 1 */ \
+    12, 0x24, 2, 3, 0x01, 0x01, 0, 2, 0x03, 0x00, 0, 0,    /* input terminal 3: USB streaming, 2 ch */   \
+    9, 0x24, 3, 4, 0x01, 0x03, 0, 3, 0,                    /* output terminal 4: speaker, from 3 */
+#define D_ASO(o)                                                                                     \
+    9, 4, (o), 0, 0, 1, 2, 0, 0,                           /* the output stream, alt 0: no bandwidth */ \
+    9, 4, (o), 1, 1, 1, 2, 0, 0,                           /* alt 1: the stream */                      \
+    7, 0x24, 1, 3, 1, 0x01, 0x00,                          /* AS general: terminal 3, delay 1, PCM */   \
+    11, 0x24, 2, 1, 2, 2, 16, 1, 0x44, 0xAC, 0x00,         /* type I: 2 ch, 16 bit, 44100 */            \
+    9, 5, 0x04, 0x09, UO_MAXP & 0xFF, UO_MAXP >> 8, 1, 0, 0,   /* EP4 OUT isochronous adaptive, 1 ms */ \
+    7, 0x25, 1, 0x00, 0, 0, 0,                             /* CS endpoint: no controls */
+#else
+#define D_AC(a)                                                                                      \
+    9, 4, (a), 0, 0, 1, 1, 0, 0,                                                                     \
+    D_AC_HEADER((a), 21)                                   /* AC header 1.00: MIDI + audio streaming */ \
+    12, 0x24, 2, 1, 0x03, 0x06, 0, UAC_NCH, 0x03, 0x00, 0, 0,   /* input terminal 1: line, L R (+ the app's) */      \
     9, 0x24, 3, 2, 0x01, 0x01, 0, 1, 0,                    /* output terminal 2: USB streaming, from 1 */
+#define D_ASO(o)
+#endif
 #define D_AS(s)                                                                                      \
     9, 4, (s), 0, 0, 1, 2, 0, 0,                           /* audio streaming, alt 0: no bandwidth */    \
     9, 4, (s), 1, 1, 1, 2, 0, 0,                           /* alt 1: the stream */                      \
@@ -385,6 +455,7 @@ static __attribute__((noinline)) void mo_trs(uint32_t now)
 #else
 #define D_AC(a) 9, 4, (a), 0, 0, 1, 1, 0, 0, 9, 0x24, 1, 0x00, 0x01, 9, 0, 1, (a) + 1,
 #define D_AS(s)
+#define D_ASO(o)
 #endif
 #define D_MIDI(m)                                                                                    \
     9, 4, (m), 0, 2, 1, 3, 0, 0,                                                                     \
@@ -397,13 +468,15 @@ static __attribute__((noinline)) void mo_trs(uint32_t now)
     5, 0x25, 1, 1, 1,                                                                                \
     9, 5, 0x81, 2, 64, 0, 0, 0, 0,                                                                   \
     5, 0x25, 1, 1, 3,
-#if FELUCCA_UAC_MIDI_LAST                                  /* ((2.2) the collection: (a) + 1 audio streaming, then MIDI) */
-#define D_AUDIO(a) D_AC(a) D_AS((a) + 1) D_MIDI((a) + 2)   /* audio + MIDI from interface a */
+/* audio + MIDI from interface a, in the order FELUCCA_UAC_MIDI_LAST picks */
+#if FELUCCA_UAC_MIDI_LAST
+#define D_AUDIO(a) D_AC(a) D_AS((a) + IF_AS) D_ASO((a) + IF_ASO) D_MIDI((a) + IF_MIDI)
 #else
-#define D_AUDIO(a) D_AC(a) D_MIDI((a) + 1) D_AS((a) + 2)
+#define D_AUDIO(a) D_AC(a) D_MIDI((a) + IF_MIDI) D_AS((a) + IF_AS) D_ASO((a) + IF_ASO)
 #endif
-#define AUD_NIF (2 + FELUCCA_UAC)
-#define AUD_LEN (92 + (63 + FMT_LEN) * FELUCCA_UAC)
+#define AUD_NIF (2 + FELUCCA_UAC + FELUCCA_UAC_OUT)
+#define AUD_FN_NIF (AUD_NIF - (FELUCCA_UAC_MIDI_LAST == 2))   /* the audio function's (its IAD): AC + its collection */
+#define AUD_LEN (92 + (63 + FMT_LEN) * FELUCCA_UAC + 74 * FELUCCA_UAC_OUT - (FELUCCA_UAC_MIDI_LAST == 2))
 #define D_CDC(c)                                                                                     \
     D_IAD((c), 2, 2, 2, 1),                                /* IAD: CDC ACM */                           \
     9, 4, (c), 0, 1, 2, 2, 1, 0,                           /* communication */                          \
@@ -417,7 +490,7 @@ static __attribute__((noinline)) void mo_trs(uint32_t now)
     7, 5, 0x83, 2, 64, 0, 0,                               /* EP3 IN bulk */
 #define CDC_LEN 66                                         /* with its IAD */
 #define BCD_LO(cdc)                                                                                  \
-    (0x10 * (FELUCCA_UAC + FELUCCA_UAC_48K) + 0x08 * FELUCCA_UAC_AS_FIRST + 0x80 * FELUCCA_UAC_MIDI_LAST +          \
+    (0x10 * (FELUCCA_UAC + FELUCCA_UAC_48K) + 0x08 * FELUCCA_UAC_AS_FIRST + 0x40 * FELUCCA_UAC_OUT + 0x80 * FELUCCA_UAC_MIDI_LAST +          \
      ((cdc) ? 0x01 + 2 * FELUCCA_USB_LAYOUT : 0))
 #define D_DEV(bcdusb, cls, sub, proto, cdc)                                                          \
     18, 1, (bcdusb) & 0xFF, (bcdusb) >> 8, (cls), (sub), (proto), 64, 0x09, 0x12, FELUCCA_USB_PID & 0xFF, \
@@ -466,7 +539,8 @@ static uint8_t usb_cdc_on = FELUCCA_CDC_DEFAULT != 0;      /* the console is pre
 #define USB_CDC_ON 0
 #define AUD_IF 0u
 #endif
-#define UAC_AS_IF (AUD_IF + 2u - FELUCCA_UAC_MIDI_LAST)        /* ((2.2) MIDI last: the audio streaming one is 1) */
+#define UAC_ASO_IF (AUD_IF + IF_ASO)
+#define UAC_AS_IF (AUD_IF + IF_AS)        /* ((2.2) MIDI last: the audio streaming one is 1) */
 static const uint8_t STR0[4] = {4, 3, 0x09, 0x04};
 static const uint8_t STR1[] = {42, 3, 'H', 0, 0xFC, 0, 'g', 0, 'e', 0, 'l', 0, 't', 0, 'o', 0, 'n', 0, ' ', 0, 'I', 0,
                                'n', 0, 's', 0, 't', 0, 'r', 0, 'u', 0, 'm', 0, 'e', 0, 'n', 0, 't', 0, 's', 0};
@@ -551,6 +625,28 @@ static void uac_ep4_reset(void)                         /* drop a queued packet;
     sie_wr(S_TXCSR2, 0x40);                             /* ISO */
 }
 
+#if FELUCCA_UAC_OUT
+static void uo_ep4_reset(void)                          /* EP4 OUT: isochronous, nothing pending */
+{
+    sie_wr(S_INDEX, 4);
+    sie_wr(S_RXCSR1, 0x90);                             /* ClrDataTog + FlushFIFO */
+    sie_wr(S_RXCSR2, 0x40);                             /* ISO */
+}
+static void uo_stream(uint32_t alt)                     /* SET_INTERFACE, configuration, bus reset */
+{
+    /* TIMER5 may preempt the audio ISR. Only the consumer writes uo_r;
+     * until it acknowledges this generation the producer uses reset_w. */
+    uo.alt = 0;
+    uo.reset_w = uo_w;
+    RING_PUBLISH();
+    uo.generation++;
+    RING_PUBLISH();
+    uo.alt = (uint8_t)alt;
+    if (alt)
+        uo.starts++;
+}
+#endif
+
 static void uac_stream(uint32_t alt)                    /* SET_INTERFACE, configuration, bus reset */
 {
     uac.go = 0;                                         /* the next render primes the ring again */
@@ -624,6 +720,13 @@ no_cdc:;
     sie_wr(S_INDEX, 4);
     sie_wr(S_TXMAXP, 0xFF);
     uac_ep4_reset();
+#if FELUCCA_UAC_OUT
+    fm1_usb_ep4_rxbuf(ep4rx);
+    sie_wr(S_INDEX, 4);
+    sie_wr(S_RXMAXP, 0xFF);
+    uo_ep4_reset();
+    uo_stream(0);
+#endif
     fm1_usb_ep_enable(1u << 4);
     uac_stream(0);
 #endif
@@ -756,6 +859,10 @@ static void ep0_service(void)
             uac_stream(0);
         uac_rate_set(UAC_RATE);                         /* a new configuration starts at 44.1 */
 #endif
+#if FELUCCA_UAC_OUT
+        uo_ep4_reset();
+        uo_stream(0);
+#endif
         goto ack;
     case 0x8008:
         e0_send(&usb.config, 1, wlength);
@@ -773,6 +880,13 @@ static void ep0_service(void)
             goto ack;
         }
 #endif
+#if FELUCCA_UAC_OUT
+        if (s[4] == UAC_ASO_IF && wvalue <= 1u && usb.config) {
+            uo_ep4_reset();
+            uo_stream(wvalue);
+            goto ack;
+        }
+#endif
         if (wvalue == 0)
             goto ack;
         goto stall;
@@ -785,12 +899,20 @@ static void ep0_service(void)
             return;
         }
 #endif
+#if FELUCCA_UAC_OUT
+        if (s[4] == UAC_ASO_IF) {
+            static uint8_t alt_o;
+            alt_o = uo.alt;
+            e0_send(&alt_o, 1, wlength);
+            return;
+        }
+#endif
         e0_send(zero2, 1, wlength);
         return;
     case 0x0201: {                                      /* CLEAR_FEATURE(ENDPOINT_HALT): data toggle reset */
         uint32_t ep = s[4] & 0x0Fu, last = USB_CDC_ON ? 3u : 1u;
 #if FELUCCA_UAC
-        if (wvalue == 0 && s[4] == 0x84u)
+        if (wvalue == 0 && (s[4] == 0x84u || (FELUCCA_UAC_OUT && s[4] == 0x04u)))
             goto ack;                                   /* isochronous: no halt, no toggle */
 #endif
         if (wvalue != 0 || ep > last)
@@ -1405,9 +1527,110 @@ static uint32_t uac_packet(uint32_t *d)
  * next one as soon as the last has gone (TxPktRdy clear). Not paced on SOF-pending (see usb_poll).
  * The ring is fed only while the host reads: it often selects alt 1 long before its first IN token,
  * and a recorder may stop reading without going back to alt 0 (a packet waiting > 20 ms). */
+#if FELUCCA_UAC_OUT
+/* Consumer/audio-ISR only: drop buffered phone audio on a CAFA mode transition
+ * without changing the host's selected alternate setting. Do not call from the
+ * main loop concurrently with uac_play. A nested producer reset is acknowledged
+ * only for the generation observed here. */
+static void uac_play_flush(void)
+{
+    uint32_t generation = uo.generation;
+    uo.go = 0;
+    uo.pos = 0;
+    uo.err_q16 = 0;
+    uo_r = uo_w;
+    RING_PUBLISH();
+    uo.seen_generation = generation;
+}
+
+/* Shared packet path: hardware calls this after DMA synchronization; host tests
+ * use it without touching SIE registers. Malformed/inactive packets are discarded. */
+static void uo_packet(const uint32_t *packet, uint32_t bytes)
+{
+    uint32_t n = bytes / 4u, i, w, f;
+    if (!usb.config || !uo.alt || bytes % 4u || n > UO_MAXF)
+        return;
+    w = uo_w;
+    f = w - (uo.seen_generation != uo.generation ? uo.reset_w : uo_r);
+    if (f > UO_N || UO_N - f < n) {
+        uo.overruns++;                                  /* full: drop the whole packet */
+    } else {
+        for (i = 0; i < n; i++)
+            uo_ring[(w + i) & (UO_N - 1u)] = packet[i];
+        RING_PUBLISH();
+        uo_w = w + n;
+    }
+    uo.pkts++;
+    uo.frames += n;
+}
+
+static void uo_service(void)                            /* EP4 OUT, TIMER5 (nested too) */
+{
+    uint32_t csr, bytes;
+    sie_wr(S_INDEX, 4);
+    csr = sie_rd(S_RXCSR1) | (sie_rd(S_RXCSR2) << 8);
+    if (!(csr & 1u))
+        return;
+    bytes = sie_rd(S_RXCOUNT1) | (sie_rd(S_RXCOUNT2) << 8);
+    fm1_usb_rx_sync();
+    uo_packet(ep4rx, bytes);
+    csr = (csr & ~0x164u) | 0x10u;
+    sie_wr(S_RXCSR1, csr & 0xFFu);
+    sie_wr(S_RXCSR2, csr >> 8);
+}
+
+/* audio ISR: add Q23 playback to the block; gain 4096 = as sent. The fill
+ * steers the nominal 44.1 / 44.1176 kHz read rate by 1/32768 per frame of error. */
+static __attribute__((noinline)) void uac_play(int32_t *out, uint32_t n, uint32_t gain_q12)
+{
+    uint32_t r, fill, i, pos, step, generation = uo.generation;
+    int32_t adj;
+    if (uo.seen_generation != generation) {
+        uo.go = 0;
+        uo.pos = 0;
+        uo.err_q16 = 0;
+        uo_r = uo.reset_w;
+        RING_PUBLISH();
+        uo.seen_generation = generation;
+    }
+    r = uo_r; fill = uo_w - r; pos = uo.pos;
+    if (!n) return;
+    if (!uo.alt || !usb.config) { uo.go = 0; return; }
+    if (!uo.go) {
+        if (fill < UO_TGT) return;
+        r = uo_w - UO_TGT;
+        pos = 0; uo.err_q16 = 0; uo.go = 1; fill = UO_TGT;
+    }
+    uo.err_q16 += (((int32_t)fill - (int32_t)UO_TGT) * 65536 - uo.err_q16) / 20;
+    adj = uo.err_q16 / 32768;
+    adj = adj > 400 ? 400 : adj < -400 ? -400 : adj;
+    step = (uint32_t)(65510 + adj);
+    if (fill < (uint32_t)(((uint64_t)n * step) >> 16) + 2u) {
+        uo.underruns++; uo.go = 0;
+        RING_PUBLISH(); uo_r = uo_w; return;
+    }
+    RING_PUBLISH();
+    for (i = 0; i < n; i++) {
+        uint32_t k = pos >> 16, a = uo_ring[(r+k)&(UO_N-1u)], b = uo_ring[(r+k+1u)&(UO_N-1u)];
+        int32_t al=(int16_t)a, ar=(int16_t)(a>>16), bl=(int16_t)b, br=(int16_t)(b>>16);
+        uint32_t fr=pos&65535u;
+        int32_t l=al*256+(int32_t)(((int64_t)(bl-al)*fr)>>8);
+        int32_t rr=ar*256+(int32_t)(((int64_t)(br-ar)*fr)>>8);
+        out[2u*i]+=(int32_t)(((int64_t)l*gain_q12)>>12);
+        out[2u*i+1u]+=(int32_t)(((int64_t)rr*gain_q12)>>12);
+        pos+=step;
+    }
+    RING_PUBLISH(); uo_r=r+(pos>>16); uo.pos=pos&65535u;
+}
+#endif
+
 static void uac_service(void)
 {
     uint32_t csr, n;
+#if FELUCCA_UAC_OUT
+    if (usb.up && usb.config && uo.alt)
+        uo_service();
+#endif
     if (!usb.up || !usb.config || !uac.alt)
         return;
     sie_wr(S_INDEX, 4);
@@ -1495,6 +1718,9 @@ static void usb_poll(void)                              /* TIMER5 ISR, 2 kHz */
 #endif
 #if FELUCCA_UAC
         uac.e0_rx = 0;
+#if FELUCCA_UAC_OUT
+        uo_stream(0);
+#endif
         uac_stream(0);
         uac_rate_set(UAC_RATE);
 #endif

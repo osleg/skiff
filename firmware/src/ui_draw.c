@@ -583,6 +583,9 @@ static void foot_hint(char *a, char *b)
  * patch (edited, INIT's): the patch's name ("INIT VOICE"); ((2.0, #35) DRUM on a user kit: its slot's name, "MY KIT") */
 static void sound_name(const track_t *t, char *b)
 {
+#if FELUCCA_CAFA
+    if (cafa_native_view) { memcpy(b,cafa_native_view+36,15); b[15]=0; return; }
+#endif
     const engine_t *e = ENGINES[t->eng_req % NENGINES];
     uint32_t u = t->eng_req % NENGINES == ENGI_DRUM ? drum_user(t->p) : 0u;
     b[0] = 0;
@@ -631,6 +634,9 @@ static void draw_foot(void)
                                                        * sound; (Skiff U4) MENU > HINTS OFF: the sound) */
     uint32_t ret = mom_down() && mom_held(0) ? 1u + ret_mode() : 0u;   /* ((2.0, D 2A) MOMENTARY: how its values */
                                                        /* come back, OCT+ KEEP, for the whole line */
+    #if FELUCCA_CAFA
+    if (cafa_native_view) { ename=cafa_native_v4 ? "LOOM" : "CAFA"; hints=tiles=0; ret=0; }
+#endif
     if (fr.on) {                                       /* ((2.5) a FREE TAKE's picker: its keys, as a layer's footer */
         khint_t kh[3] = {{KC_OCTUP, "KEEP"}, {KC_OCTDN, "BACK"}, {KC_PLAY, song.playing ? "STOP" : "LISTEN"}};
         sig = 0xF7EE5u + (uint32_t)song.playing * 31u;
@@ -650,7 +656,11 @@ static void draw_foot(void)
     if (ui.home)
         ti[0] = 0;                                     /* ((Skiff U4, L5) the header names the page: here only where it */
     else                                               /* is in its family, "2/2" (was "ENV DEST 2/2", "HOME") */
-        page_pos(ti);                                  /* (a sheet too, #7) */
+        page_pos(ti);
+#if FELUCCA_CAFA
+    if (cafa_native_view) ti[0]=0;                      /* one supported ENV page, not a false 1/2 promise */
+#endif
+    /* (a sheet too, #7) */
     str_cpy(s, ename, sizeof s);
     s[str_len(s) + 1u] = 0;
     s[str_len(s)] = (char)('1' + song.sel);
@@ -803,6 +813,12 @@ static void draw_foot(void)
         }
         x = 8;                                         /* (Skiff) the selected track's cushion (not the header's) */
         GFX_HOOK_ALIGN(0, ly + AF_S_CAP_Y, 0, ly + AF_S_CAP_Y + AF_S_CAP_H, AL_V, "footer icons on the names' line");
+#if FELUCCA_CAFA
+        if (cafa_native_view && cafa_native_v4) {
+            char track[3]={'T',(char)('1'+cafa_native_view[0]),0};
+            x=cv_text(x,ly,&AF_S,track,T_ACCENT)+5;
+        } else
+#endif
         x += cv_icon_in(x, ly + AF_S_CAP_Y, 0, AF_S_CAP_H, 16, trk_icon(song.sel, 1), T_ACCENT, T_BG) + 5;
         x = cv_text_fit(x, ly, &AF_S, ename, T_THEME, T_BG, 80);
         if (list_mode())                               /* ((Skiff U2) PRESETS lists the favourites; phase 9: a type) */
@@ -851,7 +867,11 @@ static void draw_columns(void)
     uint32_t c;
     char val[12];
     const char *unit;
-    (void)motion_mask(song.sel, card_mot_mask);       /* (PLAY OFF: no scan) */
+    (void)motion_mask(
+#if FELUCCA_CAFA
+                      cafa_native_view ? NTRK :
+#endif
+                      song.sel, card_mot_mask);       /* (PLAY OFF: no scan) */
     if (fr.on) {
         fr_columns();
         return;
@@ -1454,9 +1474,15 @@ static void confirm_text(char *a, char *b)
 static void draw_confirm(void) { draw_confirm_blocks(); }   /* (U2: BLOCKS' dialog, ui_blocks.c) */
 
 
+#if FELUCCA_CAFA
+#include "cafa_native_ui.c"
+#endif
 static void ui_draw_page(uint32_t counting);
 static void ui_draw(void)
 {
+#if FELUCCA_CAFA
+    if (cafa_draw()) return;
+#endif
     static uint8_t counting;
     ui.frame++;
     if (ui.take_t)                                      /* (Skiff: the TAKE box, ui_take.c) */

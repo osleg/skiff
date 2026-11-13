@@ -383,6 +383,9 @@ static void smk_leds_out(const uint8_t *nl, const uint8_t *nd, const uint8_t *nb
 #endif
 static void ui_leds(void)
 {
+#if FELUCCA_CAFA
+    if (cafa_leds()) return;
+#endif
     uint8_t nl[FM1_NCOL] = {0}, nd[FM1_NCOL] = {0}, own[FM1_NCOL] = {0}, og[FM1_NCOL] = {0}, nb[FM1_NCOL] = {0};
     uint8_t nm[FM1_NCOL] = {0}, sg[FM1_NCOL] = {0}, sm[FM1_NCOL] = {0};
     uint32_t k, c, g, br, beat, sc, sr = 0;
@@ -2172,6 +2175,9 @@ static void shift_mark(void)
 }
 static void ui_input(void)
 {
+#if FELUCCA_CAFA
+    if (cafa_input()) return;
+#endif
     uint32_t pressed = fm1_input_edges(0), notes = fm1_input_note_edges(), now = fm1_ticks(), id, b, k;
     uint32_t home, save;
     int rec_own;

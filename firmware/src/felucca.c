@@ -9,6 +9,13 @@
 /* build.py: FELUCCA_<NAME>=0 / 1 in the environment overrides these. Elsewhere: FELUCCA_SLICE, FELUCCA_FM4
  * (core.h: the SLICE engine, the DIGITAL engine), FELUCCA_ICONS (icons.c, the parameter icons; on by default),
  * FELUCCA_OTA_RAMONLY (ota.c). */
+/* (CAFA prototype) Explicit opt-in; stock standalone behavior remains the default. */
+#ifndef FELUCCA_CAFA
+#define FELUCCA_CAFA 0
+#endif
+#if FELUCCA_CAFA && BOARD_SMK37
+#error "CAFA prototype currently targets FM-1 only"
+#endif
 #ifndef FELUCCA_FLASH
 #define FELUCCA_FLASH 1          /* flash driver + storage.c: settings, projects, user presets */
 #endif
@@ -123,6 +130,16 @@ static inline __attribute__((always_inline)) void *audio_far(void *p) { void *vo
 #include "midi_uart.c"
 #endif
 #include "seq.c"
+#if FELUCCA_CAFA
+#if !FELUCCA_OTA
+#error "CAFA requires the existing USB SysEx transport"
+#endif
+#include "cafa_protocol.h"
+static cafa_link_t cafa;
+static volatile uint8_t cafa_audio_on;
+static int cafa_input(void), cafa_draw(void), cafa_leds(void);
+static int cafa_frame(const uint8_t *, uint32_t);
+#endif
 #include "audio.c"
 
 /* -------------------------------------------------------------- UI --- */
@@ -157,4 +174,7 @@ static inline __attribute__((always_inline)) void *audio_far(void *p) { void *vo
 #include "smk_ui.c"              /* the SMK-37's own controls: pads, faders, wheels, pedal, < >, KEY VELOCITY */
 #endif
 #include "master.c"              /* the MASTER pot (#137: read before the audio starts) */
+#if FELUCCA_CAFA
+#include "cafa.c"
+#endif
 #include "main.c"
